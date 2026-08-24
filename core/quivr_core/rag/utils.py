@@ -46,6 +46,29 @@ def cited_answer_filter(tool):
     return tool["name"] == "cited_answer"
 
 
+def _coerce_citations(raw: Any) -> list[int]:
+    """Keep only integer citation IDs. Local models often stream "[1]" as ["[", "1", "]"]."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raw = [raw]
+
+    citations: list[int] = []
+    for item in raw:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            citations.append(item)
+            continue
+        if isinstance(item, str):
+            stripped = item.strip().strip("[]")
+            if stripped.isdigit() or (
+                stripped.startswith("-") and stripped[1:].isdigit()
+            ):
+                citations.append(int(stripped))
+    return citations
+
+
 def get_chunk_metadata(
     msg: AIMessageChunk, sources: list[Any] | None = None
 ) -> RAGResponseMetadata:
@@ -60,8 +83,12 @@ def get_chunk_metadata(
     for tool_call in msg.tool_calls:
         if tool_call.get("name") == "cited_answer" and "args" in tool_call:
             args = tool_call["args"]
-            all_citations.extend(args.get("citations", []))
-            all_followup_questions.extend(args.get("followup_questions", []))
+            all_citations.extend(_coerce_citations(args.get("citations", [])))
+            followups = args.get("followup_questions", [])
+            if isinstance(followups, list):
+                all_followup_questions.extend(
+                    [q for q in followups if isinstance(q, str)]
+                )
 
     metadata["citations"] = all_citations
     metadata["followup_questions"] = all_followup_questions[:3]  # Limit to 3
@@ -146,7 +173,7 @@ def parse_response(raw_response: RawRAGResponse, model_name: str) -> ParsedRAGRe
             if "args" in tool_call:
                 args = tool_call["args"]
                 if "citations" in args:
-                    all_citations.extend(args["citations"])
+                    all_citations.extend(_coerce_citations(args["citations"]))
                 if "followup_questions" in args:
                     all_followup_questions.extend(args["followup_questions"])
                 if "answer" in args:

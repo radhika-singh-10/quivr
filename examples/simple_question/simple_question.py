@@ -1,4 +1,5 @@
 import tempfile
+from uuid import uuid4
 
 from quivr_core import Brain
 
@@ -16,5 +17,5 @@ if __name__ == "__main__":
             file_paths=[temp_file.name],
         )
 
-        answer = brain.ask("what is gold? answer in french")
+        answer = brain.ask(uuid4(), "what is gold? answer in french")
         print("answer QuivrQARAGLangGraph :", answer)
