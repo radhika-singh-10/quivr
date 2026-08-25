@@ -1,4 +1,7 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
 def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
     import sys as _lineaje_sys, os as _lineaje_os, importlib.util as _lineaje_ilu
     if "_lineaje_gr_stub_client" in _lineaje_sys.modules:
         return _lineaje_sys.modules["_lineaje_gr_stub_client"]
@@ -124,8 +127,17 @@ async def main(message: cl.Message):
             if source.page_content not in saved_sources:
                 saved_sources.add(source.page_content)
                 saved_sources_complete.append(source)
+                # LINEAJE: enforce() `source` at agent->log log_emit — scan flagged AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.); AI_DAT_SEC_029 (Enforce decision logging, audit trail, and forensic readiness for AI-driven actions.). Mask/block; do not remove without review. site_id='site:sha256:22f161ed56d256f46ba6b12c58f23d6595554b68757ad08ea3edb162e5c592eb'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:22f161ed56d256f46ba6b12c58f23d6595554b68757ad08ea3edb162e5c592eb', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                source = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, source, content_type='application/json'))
                 print(source)
-                elements.append(cl.Text(name=source.metadata["original_file_name"], content=source.page_content, display="side"))
+                _lineaje_content = source.page_content
+                # LINEAJE: enforce() `_lineaje_content` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_027 (Enforce output data minimization for model, tool, and API responses.); AI_DAT_SEC_029 (Enforce decision logging, audit trail, and forensic readiness for AI-driven actions.); AI_DAT_SEC_030 (Enforce minimum six-month log retention for high-risk AI systems). Mask/block; do not remove without review. site_id='site:sha256:48d5f4d6f0d4ae4562d2349c86b66daec93f1a9320211091d26e25d699941cf0'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:48d5f4d6f0d4ae4562d2349c86b66daec93f1a9320211091d26e25d699941cf0', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+                _lineaje_content = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, _lineaje_content, content_type='text/plain'))
+                elements.append(cl.Text(name=source.metadata["original_file_name"], content=_lineaje_content, display="side"))
     
     think.status = cl.TaskStatus.DONE
     tts.status = cl.TaskStatus.RUNNING
