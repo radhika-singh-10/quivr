@@ -1,3 +1,17 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 import asyncio
 import logging
 import os
@@ -17,6 +31,10 @@ logger.addHandler(ConsoleOutputHandler)
 
 logger = logging.getLogger("megaparse")
 logger.setLevel(logging.DEBUG)
+# LINEAJE: enforce() `ConsoleOutputHandler` at agent->log log_emit — scan flagged AI_DAT_SEC_010 (Do not log PII.). Mask/block; do not remove without review. site_id='site:sha256:84f9bd695c0d8fd619daf296204a284a4207a6e342bfb4ed7dcee8598adeca61'
+_gr_client = _lineaje_load_gr_client()
+_gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:84f9bd695c0d8fd619daf296204a284a4207a6e342bfb4ed7dcee8598adeca61', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+ConsoleOutputHandler = _gr_client.enforce(_gr_site, ConsoleOutputHandler, content_type='application/json')
 logger.addHandler(ConsoleOutputHandler)
 
 
@@ -132,6 +150,10 @@ async def main():
     retrieval_config = assistant_config.retrieval_config
     for i, (question, truth) in enumerate(zip(questions, answers, strict=False)):
         chunk = brain.ask(question=question, retrieval_config=retrieval_config)
+        # LINEAJE: enforce() `question` at agent->log log_emit — scan flagged AI_DAT_SEC_010 (Do not log PII.). Mask/block; do not remove without review. site_id='site:sha256:d475d1e22867bfee41f2be2f5cf1116e8eadef2ad2efc1ea7a3071a2208716ec'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:d475d1e22867bfee41f2be2f5cf1116e8eadef2ad2efc1ea7a3071a2208716ec', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        question = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, question, content_type='application/json'))
         print(
             "\n Question: ", question, "\n Answer: ", chunk.answer, "\n Truth: ", truth
         )
