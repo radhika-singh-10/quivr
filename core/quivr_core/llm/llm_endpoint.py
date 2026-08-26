@@ -1,3 +1,49 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
+class GRBlockedError(Exception):
+    def __init__(self, policy_id, reason):
+        self.policy_id, self.reason = policy_id, reason
+        super().__init__("Guardrail block for policy %r: %s" % (policy_id, reason))
+
+def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **context):
+    import json as _j, logging as _lg, os as _os, urllib.error as _ue, urllib.request as _ur
+    _log = _lg.getLogger("lineaje.gr_client")
+    url = _os.environ.get("GR_SERVICE_URL", "")
+    if not url:
+        return data
+    tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
+    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
+    hop_label = source_type + "->" + destination_type
+    params_key = "out_params" if destination_type == "agent" else "in_params"
+    try:
+        headers = {"Content-Type": "application/json"}
+        if bearer:
+            headers["Authorization"] = "Bearer " + bearer
+        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": data}}
+        for _k, _v in context.items():
+            if _v:
+                body[_k] = _v
+        if tid:
+            body["tenant_id"] = tid
+        req = _ur.Request(url.rstrip("/") + "/enforce", data=_j.dumps(body).encode(), headers=headers, method="POST")
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            result = _j.loads(resp.read())
+    except Exception as exc:
+        if isinstance(exc, _ue.HTTPError) and exc.code == 403:
+            try: detail = _j.loads(exc.read()).get("detail", {})
+            except Exception: detail = {}
+            blocked_by = detail.get("blocked_by") or []
+            policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
+            reason = detail.get("message", "Request denied by policy enforcement.")
+            _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
+            if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
+                return data
+            raise GRBlockedError(policy_id, reason)
+        _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
+        return data
+    if result.get("status") == "escalate":
+        _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
+    return result.get("result", {}).get("data", data)
 import logging
 import os
 import time
@@ -53,6 +99,13 @@ class LLMTokenizer:
 
                     self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_hub)
             except OSError:  # if we don't manage to connect to huggingface and/or no cached models are present
+                _lineaje_payload = f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
+                try:
+                    _lineaje_payload = gr_check(_lineaje_payload, "agent", "log", site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90')
+                except Exception as _gr_exc:
+                    if type(_gr_exc).__name__ == "GRBlockedError": raise
+                    _lineaje_payload = _lineaje_payload
+                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
                 logger.warning(
                     f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
                 )
@@ -81,6 +134,13 @@ class LLMTokenizer:
                 try:
                     total_size += os.path.getsize(file_path)
                 except (OSError, FileNotFoundError):
+                    _lineaje_payload = f"Could not access tokenizer file: {file_path}"
+                    try:
+                        _lineaje_payload = gr_check(_lineaje_payload, "agent", "log", site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8')
+                    except Exception as _gr_exc:
+                        if type(_gr_exc).__name__ == "GRBlockedError": raise
+                        _lineaje_payload = _lineaje_payload
+                        __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
                     logger.debug(f"Could not access tokenizer file: {file_path}")
 
         return total_size if total_size > 0 else self._default_size
@@ -93,6 +153,12 @@ class LLMTokenizer:
         if cache_key in cls._cache:
             tokenizer, size, _ = cls._cache[cache_key]
             cls._cache[cache_key] = (tokenizer, size, time.time())
+            try:
+                tokenizer = gr_check(tokenizer, "agent", "user_interface", site_id='site:sha256:42aa2857bf600e5ddc797debb910096c6af6fec90269378227a80c372d8a984f')
+            except Exception as _gr_exc:
+                if type(_gr_exc).__name__ == "GRBlockedError": raise
+                tokenizer = tokenizer
+                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
             return tokenizer
 
         # Create new instance
@@ -116,6 +182,12 @@ class LLMTokenizer:
         # Add new instance to cache with current timestamp
         cls._cache[cache_key] = (instance, instance._size_bytes, time.time())
         cls._current_cache_size += instance._size_bytes
+        try:
+            instance = gr_check(instance, "agent", "user_interface", site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e')
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError": raise
+            instance = instance
+            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return instance
 
     @classmethod
@@ -183,6 +255,13 @@ class LLMTokenizer:
                     f"Cache count: {len(cls._cache)}"
                 )
             except Exception as e:
+                _lineaje_payload = f"Failed to preload tokenizer {hub}: {str(e)}"
+                try:
+                    _lineaje_payload = gr_check(_lineaje_payload, "agent", "log", site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41')
+                except Exception as _gr_exc:
+                    if type(_gr_exc).__name__ == "GRBlockedError": raise
+                    _lineaje_payload = _lineaje_payload
+                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
                 logger.warning(f"Failed to preload tokenizer {hub}: {str(e)}")
 
 
@@ -305,6 +384,12 @@ class LLMEndpoint:
             instance = cls(llm=_llm, llm_config=config)
             cls._cache[hashed_config] = instance
 
+            try:
+                instance = gr_check(instance, "agent", "user_interface", site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9')
+            except Exception as _gr_exc:
+                if type(_gr_exc).__name__ == "GRBlockedError": raise
+                instance = instance
+                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
             return instance
 
         except ImportError as e:
