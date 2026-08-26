@@ -1,4 +1,7 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
 def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
     import sys as _lineaje_sys, os as _lineaje_os, importlib.util as _lineaje_ilu
     if "_lineaje_gr_stub_client" in _lineaje_sys.modules:
         return _lineaje_sys.modules["_lineaje_gr_stub_client"]
@@ -62,6 +65,10 @@ def run_in_event_loop(func, *args, **kwargs):
     else:
         result = func(*args, **kwargs)
     loop.close()
+    # LINEAJE: enforce() `result` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_029 (Enforce decision logging, audit trail, and forensic readiness for AI-driven actions.). Mask/block; do not remove without review. site_id='site:sha256:ffcbc0cc7116dfd3069669ce4b02abc06e13efebed2eef28bb263a3fa6709777'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ffcbc0cc7116dfd3069669ce4b02abc06e13efebed2eef28bb263a3fa6709777', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+    result = _gr_client.enforce(_gr_site, result, content_type='text/plain')
     return result
 
 
@@ -153,7 +160,12 @@ async def ask():
             f"Lineaje guardrail unavailable at site_id='site:sha256:e4b5b8f0a47e56169b0697dc231075350ebd17cad0545da6936da16622911761' and fail_mode=BLOCK: {_gr_exc}"
         ) from _gr_exc
     print(_lineaje_payload)
-    return jsonify({"audio_base64": audio_base64})
+    _lineaje_payload_156 = {"audio_base64": audio_base64}
+    # LINEAJE: enforce() `_lineaje_payload_156` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_038 (AI consequential decision records must be retained for a minimum of three years). Mask/block; do not remove without review. site_id='site:sha256:7467efaf379c851ac52761b8eb98d9f5f8f584782411e28625360ea59f1917ad'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:7467efaf379c851ac52761b8eb98d9f5f8f584782411e28625360ea59f1917ad', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+    _lineaje_payload_156 = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, _lineaje_payload_156, content_type='text/plain'))
+    return jsonify(_lineaje_payload_156)
 
 
 def transcribe_audio_file(audio_file):
