@@ -33,11 +33,10 @@ max_history: 10
 #   # Number of chunks returned by the reranker
 #   top_n: 5
 
-# Configuration for the LLM
+# Configuration for the LLM (Ollama OpenAI-compatible API)
 llm_config:
-
-  # maximum number of tokens passed to the LLM to generate the answer
+  model: llama3.2
+  llm_base_url: http://localhost:11434/v1
+  llm_api_key: ollama
   max_output_tokens: 8192
-
-  # temperature for the LLM
   temperature: 0.7
