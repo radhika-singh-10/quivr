@@ -1,3 +1,10 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+#
+# This file is part of the Lineaje AI Policy Orchestration (AIPO) guardrail
+# runtime. It is copied alongside instrumented source files so a generated
+# guardrail stub can load it via ``_lineaje_load_gr_client()`` and call
+# ``enforce()``/``check()`` without any change to the customer's own
+# dependencies.
 """Stdlib HTTP client for GR /enforce. Copied into the scanned repo at runtime.
 
 ``check(site, payload)`` is the current stub API. ``call_gr_enforce`` remains
@@ -5,27 +12,8 @@ for older inserted sites. Both fail open unless the site fail_mode is BLOCK.
 Unknown sites are registered and leftover PII is masked locally.
 """
 from __future__ import annotations
-def _lineaje_load_gr_client():
-    import sys as _lineaje_sys, os as _lineaje_os, importlib.util as _lineaje_ilu
-    if "_lineaje_gr_stub_client" in _lineaje_sys.modules:
-        return _lineaje_sys.modules["_lineaje_gr_stub_client"]
-    _here = _lineaje_os.path.dirname(_lineaje_os.path.abspath(__file__))
-    _cur, _path = _here, _lineaje_os.path.join(_here, "gr_stub_client.py")
-    for _ in range(8):
-        _cand = _lineaje_os.path.join(_cur, "gr_stub_client.py")
-        if _lineaje_os.path.isfile(_cand):
-            _path = _cand
-            break
-        _parent = _lineaje_os.path.dirname(_cur)
-        if _parent == _cur:
-            break
-        _cur = _parent
-    _spec = _lineaje_ilu.spec_from_file_location("_lineaje_gr_stub_client", _path)
-    _mod = _lineaje_ilu.module_from_spec(_spec)
-    _lineaje_sys.modules["_lineaje_gr_stub_client"] = _mod
-    _spec.loader.exec_module(_mod)
-    return _mod
 
+__version__ = '2.0.0-alpha'
 
 import json
 import logging
@@ -241,25 +229,51 @@ def _looks_like_lineaje_pat(value: str) -> bool:
     return (value or "").strip().startswith("lineaje_pat_")
 
 
+def _strip_bearer_prefix(value: str) -> str:
+    raw = (value or "").strip()
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip()
+    return raw
+
+
+def _mcp_access_jwt_from_env() -> str:
+    """Access JWT the MCP server already has (session / local-dev env)."""
+    for key in (
+        "MCP_BEARER_TOKEN",
+        "LINEAJE_BEARER_TOKEN",
+        "GR_BEARER_TOKEN",
+        "BEARER_TOKEN",
+    ):
+        token = _strip_bearer_prefix(os.environ.get(key, ""))
+        if token and _looks_like_jwt(token):
+            return token
+    return ""
+
+
 def _resolve_enforce_bearer(lineaje_pat: str = "") -> str:
     """Return the Authorization Bearer for POST /enforce.
 
-    Customer runtime uses ``refreshtoken`` from ``.lineaje/guardrail.json``.
-    That opaque token is exchanged at renew-access-token for a short-lived
-    access JWT. If the exchange cannot run, the refresh token itself is sent
-    so ``POST /enforce`` can exchange it server-side.
+    Prefer an access JWT the MCP server already has. Otherwise take a refresh
+    token (``LINEAJE_REFRESH_TOKEN`` / ``.lineaje/guardrail.json`` ``refreshtoken``)
+    and exchange it at renew-access-token. If the exchange cannot run, the
+    refresh token itself is sent so ``POST /enforce`` can exchange it server-side.
 
     A scan-operator ``LINEAJE_PAT_TOKEN=lineaje_pat_…`` in a local ``.env``
     must not win over the customer refresh token — that PAT is a different
     identity and skips the renew path on /enforce.
     """
-    explicit = (lineaje_pat or os.environ.get("GR_BEARER_TOKEN") or "").strip()
+    explicit = _strip_bearer_prefix(lineaje_pat)
     if explicit and _looks_like_jwt(explicit):
         return explicit
+
+    mcp_jwt = _mcp_access_jwt_from_env()
+    if mcp_jwt:
+        return mcp_jwt
 
     manifest = _load_guardrail_manifest()
     refresh = (
         os.environ.get("LINEAJE_REFRESH_TOKEN")
+        or os.environ.get("MCP_REFRESH_TOKEN")
         or (manifest.get("refreshtoken") or manifest.get("refresh_token") or "")
         or (
             explicit
@@ -302,7 +316,8 @@ def _ensure_runtime_env_loaded() -> None:
     _RUNTIME_ENV_LOADED = True
     _keys = frozenset({
         "LINEAJE_PAT_TOKEN", "LINEAJE_PAT", "GR_BEARER_TOKEN",
-        "LINEAJE_REFRESH_TOKEN", "LINEAJE_RENEW_ACCESS_TOKEN_URL",
+        "LINEAJE_REFRESH_TOKEN", "MCP_REFRESH_TOKEN", "LINEAJE_RENEW_ACCESS_TOKEN_URL",
+        "MCP_BEARER_TOKEN", "LINEAJE_BEARER_TOKEN", "BEARER_TOKEN",
     })
     _candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -386,23 +401,10 @@ def call_gr_enforce(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
         if result.get("status") == "escalate":
-            try:
-                _gr_client = _lineaje_load_gr_client()
-                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c8c1d4522441153b99d642ccbfe4995fe165002cc598d21076a6ad3b9dc68f22', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
-                _gr_decision = _gr_client.check(_gr_site, hop, content_type='application/json')
-                if _gr_decision.blocked:
-                    raise _gr_decision.as_error()
-                hop = _gr_decision.payload
-            except PermissionError:
-                raise
-            except Exception as _gr_exc:
-                import logging as _lineaje_logging
-                _lineaje_logging.getLogger("lineaje.gr_client").warning(
-                    "Lineaje guardrail unavailable at site_id='site:sha256:c8c1d4522441153b99d642ccbfe4995fe165002cc598d21076a6ad3b9dc68f22' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
-                )
-                raise PermissionError(
-                    f"Lineaje guardrail unavailable at site_id='site:sha256:c8c1d4522441153b99d642ccbfe4995fe165002cc598d21076a6ad3b9dc68f22' and fail_mode=BLOCK: {_gr_exc}"
-                ) from _gr_exc
+            # LINEAJE: enforce() `hop` at agent->log log_emit — scan flagged AI_DAT_SEC_029 (Enforce decision logging, audit trail, and forensic readiness for AI-driven actions.); AI_DAT_SEC_030 (Enforce minimum six-month log retention for high-risk AI systems). Mask/block; do not remove without review. site_id='site:sha256:c8c1d4522441153b99d642ccbfe4995fe165002cc598d21076a6ad3b9dc68f22'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c8c1d4522441153b99d642ccbfe4995fe165002cc598d21076a6ad3b9dc68f22', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+            hop = _gr_client.enforce(_gr_site, hop, content_type='application/json')
             _logger.warning("gr_stub_client[%s]: escalation flagged — passing through for human review", hop)
         _announce_enforce(url, hop, result.get("status", "allow"), extra=f"actions={result.get('actions_applied') or []}")
         return result
@@ -1372,23 +1374,6 @@ def check(
                 "warning": reason,
             }, site_id=site.site_id)
             return _finalize_decision(blocked, payload)
-        try:
-            _gr_client = _lineaje_load_gr_client()
-            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:096d38037dacfb611ccf14189f8752d1a54c80862df835b595a856a1fb12836c', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
-            _gr_decision = _gr_client.check(_gr_site, hop, content_type='application/json')
-            if _gr_decision.blocked:
-                raise _gr_decision.as_error()
-            hop = _gr_decision.payload
-        except PermissionError:
-            raise
-        except Exception as _gr_exc:
-            import logging as _lineaje_logging
-            _lineaje_logging.getLogger("lineaje.gr_client").warning(
-                "Lineaje guardrail unavailable at site_id='site:sha256:096d38037dacfb611ccf14189f8752d1a54c80862df835b595a856a1fb12836c' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
-            )
-            raise PermissionError(
-                f"Lineaje guardrail unavailable at site_id='site:sha256:096d38037dacfb611ccf14189f8752d1a54c80862df835b595a856a1fb12836c' and fail_mode=BLOCK: {_gr_exc}"
-            ) from _gr_exc
         _logger.warning(
             "gr_stub_client.check[%s]: GR service call failed (%s) POST %s/enforce — %s",
             hop, exc, url,
@@ -1396,26 +1381,51 @@ def check(
         )
         return Decision(_fail_response(site, f"GR service error: {exc}", payload), site_id=site.site_id)
     except Exception as exc:
-        try:
-            _gr_client = _lineaje_load_gr_client()
-            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f39e625db57dcf2341472d4775aa5ef7795fcc9838de7cb0b34fe136977edcd1', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
-            _gr_decision = _gr_client.check(_gr_site, hop, content_type='application/json')
-            if _gr_decision.blocked:
-                raise _gr_decision.as_error()
-            hop = _gr_decision.payload
-        except PermissionError:
-            raise
-        except Exception as _gr_exc:
-            import logging as _lineaje_logging
-            _lineaje_logging.getLogger("lineaje.gr_client").warning(
-                "Lineaje guardrail unavailable at site_id='site:sha256:f39e625db57dcf2341472d4775aa5ef7795fcc9838de7cb0b34fe136977edcd1' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
-            )
-            raise PermissionError(
-                f"Lineaje guardrail unavailable at site_id='site:sha256:f39e625db57dcf2341472d4775aa5ef7795fcc9838de7cb0b34fe136977edcd1' and fail_mode=BLOCK: {_gr_exc}"
-            ) from _gr_exc
         _logger.warning(
             "gr_stub_client.check[%s]: GR service call failed (%s) POST %s/enforce — %s",
             hop, exc, url,
             "failing closed (fail_mode=BLOCK)" if site.fail_mode == "BLOCK" else "failing open",
         )
         return Decision(_fail_response(site, f"GR service unreachable: {exc}", payload), site_id=site.site_id)
+
+
+def enforce(
+    site: SiteDescriptor,
+    payload: Any,
+    content_type: str = "application/json",
+    *,
+    variable_name: str = "",
+    source_file: str = "",
+    before_line: "int | None" = None,
+) -> Any:
+    """Single call-site entry point for an inserted stub — call this, get the value back.
+
+    ``check()`` never raises (infra failures fail open/closed internally via
+    ``_fail_response``), so the only exception surface here is truly
+    unexpected breakage in the call itself (e.g. a bad companion version).
+    This wraps that surface, the blocked -> ``PermissionError`` raise, and
+    the optional persist-to-source rewrite, so an inserted stub is a 2-3
+    line call site instead of inlining its own try/except/logging block.
+    """
+    try:
+        decision = check(site, payload, content_type=content_type)
+    except PermissionError:
+        raise
+    except Exception as exc:
+        _logger.warning(
+            "Lineaje guardrail unavailable at site_id=%r (%s) — %s",
+            site.site_id, exc,
+            "blocking (fail_mode=BLOCK)" if site.fail_mode == "BLOCK" else "passing data through unchecked",
+        )
+        if site.fail_mode == "BLOCK":
+            raise PermissionError(
+                f"Lineaje guardrail unavailable at site_id={site.site_id!r} and fail_mode=BLOCK: {exc}"
+            ) from exc
+        return payload
+    if decision.blocked:
+        raise decision.as_error()
+    if variable_name and source_file:
+        persist_runtime_mask_to_source(
+            decision.payload, source_file=source_file, variable_name=variable_name, before_line=before_line,
+        )
+    return decision.payload
