@@ -2,8 +2,14 @@ import tempfile
 from uuid import uuid4
 
 import chainlit as cl
-from quivr_core import Brain
+from quivr_core import Brain, register_processor
+from quivr_core.files.file import FileExtension
+from quivr_core.processor.implementations.simple_txt_processor import SimpleTxtProcessor
 from quivr_core.rag.entities.config import RetrievalConfig
+
+# Parse .txt locally. Megaparse is the default and tries Quivr's hosted NATS,
+# which fails with "nodename nor servname provided" when that host is down.
+register_processor(FileExtension.txt, SimpleTxtProcessor, override=True)
 
 
 @cl.on_chat_start

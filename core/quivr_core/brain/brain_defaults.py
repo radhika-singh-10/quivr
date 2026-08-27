@@ -1,4 +1,5 @@
 import logging
+import os
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -31,6 +32,15 @@ async def build_default_vectordb(
 
 
 def default_embedder() -> Embeddings:
+    ollama_embed = os.getenv("OLLAMA_EMBED_MODEL")
+    if ollama_embed:
+        from langchain_community.embeddings import OllamaEmbeddings
+
+        logger.debug("Loaded OllamaEmbeddings as default embedder for brain")
+        return OllamaEmbeddings(
+            model=ollama_embed,
+            base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        )
     try:
         from langchain_openai import OpenAIEmbeddings
 
@@ -44,6 +54,23 @@ def default_embedder() -> Embeddings:
 
 
 def default_llm() -> LLMEndpoint:
+    ollama_model = os.getenv("OLLAMA_CHAT_MODEL")
+    if ollama_model:
+        # ChatOpenAI requires a key even when talking to Ollama's OpenAI-compatible API.
+        os.environ.setdefault("OPENAI_API_KEY", "ollama")
+        host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+        logger.debug("Loaded Ollama ChatOpenAI as default LLM for brain")
+        llm = LLMEndpoint.from_config(
+            LLMEndpointConfig(
+                model=ollama_model,
+                llm_api_key="ollama",
+                llm_base_url=f"{host}/v1",
+                max_output_tokens=8192,
+                temperature=0.7,
+            )
+        )
+        llm._supports_func_calling = False
+        return llm
     try:
         logger.debug("Loaded ChatOpenAI as default LLM for brain")
         llm = LLMEndpoint.from_config(
