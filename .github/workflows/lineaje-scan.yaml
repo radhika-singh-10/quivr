@@ -30,7 +30,7 @@ jobs:
 
       - name: Prepare scanner
         run: |
-          cp .github/scm_unifai_scan_hybrid.py /tmp/scm_unifai_scan_hybrid.py
+          cp .github/scripts/scm_unifai_scan_hybrid.py /tmp/scm_unifai_scan_hybrid.py
           rm -rf .github .git
 
       - name: Run Lineaje AI policy scan
