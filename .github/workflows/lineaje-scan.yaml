@@ -1,0 +1,48 @@
+name: Lineaje UnifAI Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_fix_pr:
+        description: "Open a remediation PR with the stubs and guardrails"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  lineaje-scan:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install mcp==1.27.1 httpx
+
+      - name: Prepare scanner
+        run: |
+          cp .github/scm_unifai_scan_hybrid.py /tmp/scm_unifai_scan_hybrid.py
+          rm -rf .github .git
+
+      - name: Run Lineaje AI policy scan
+        env:
+          LINEAJE_PAT_TOKEN: ${{ secrets.LINEAJE_PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MCP_TLS_INSECURE_SKIP_VERIFY: "1"
+        run: |
+          python /tmp/scm_unifai_scan_hybrid.py \
+            --source-path . \
+            --repo ${{ github.repository }} \
+            --branch ${{ github.ref_name }} \
+            --head-sha ${{ github.sha }} \
+            --mcp-server-url https://172.206.26.109/mcp \
+            ${{ inputs.create_fix_pr && '--create-fix-pr' || '' }} >> "$GITHUB_STEP_SUMMARY"
