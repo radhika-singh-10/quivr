@@ -44,5 +44,5 @@ jobs:
             --repo ${{ github.repository }} \
             --branch ${{ github.ref_name }} \
             --head-sha ${{ github.sha }} \
-            --mcp-server-url https:// 172.19.0.68/mcp \
+            --mcp-server-url https://172.19.0.68/mcp \
             ${{ inputs.create_fix_pr && '--create-fix-pr' || '' }} >> "$GITHUB_STEP_SUMMARY"
