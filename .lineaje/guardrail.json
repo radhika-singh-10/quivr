@@ -1,0 +1,8 @@
+{
+  "contract_version": "2.0",
+  "gr_service_url": "https://mcp.v2.prod.veedna.com",
+  "enforce_endpoint": "https://mcp.v2.prod.veedna.com/enforce",
+  "generated_by": "lineaje_aiepo_security_workflow",
+  "note": "Runtime guardrail stubs read refreshtoken from this file, exchange it at SCIM renew-access-token for a short-lived Bearer, and POST /enforce. Env GR_SERVICE_URL / LINEAJE_REFRESH_TOKEN / LINEAJE_PAT_TOKEN override the manifest when set.",
+  "refreshtoken": "<LINEAJE_REFRESH_TOKEN>"
+}
