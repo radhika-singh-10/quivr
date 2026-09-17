@@ -1309,6 +1309,258 @@ def parallel_batch_scan(
     )
 
 # ===========================================================================
+# Report merging — combine each batch's own markdown report (server-rendered,
+# one full "# LINEAJE AI POLICY REPORT" per batch) into a single report with
+# one Section 1 / 2 / 3 and one Enforcement Summary, instead of N reports
+# concatenated back-to-back (one per batch).
+# ===========================================================================
+
+_REPORT_SECTION_HEADERS = [
+    "## Enforcement Summary",
+    "### SECTION 1: AIBOM Discovery",
+    "### SECTION 2: Policy Violations",
+    "### SECTION 3: Controls Enforced",
+    "### AI Component Relationship Graph",
+    "### Phase Timing",
+]
+
+_ENFORCEMENT_PREVIEW_CAP = 12
+
+
+def _split_report_sections(report: str) -> Dict[str, str]:
+    """*report* → {header: content up to the next known header}, plus the
+    text before the first header under ``__preamble__``."""
+    positions = sorted(
+        (idx, h) for h in _REPORT_SECTION_HEADERS for idx in [report.find(h)] if idx != -1
+    )
+    sections: Dict[str, str] = {"__preamble__": report[: positions[0][0]] if positions else report}
+    for i, (idx, h) in enumerate(positions):
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(report)
+        sections[h] = report[idx + len(h): end]
+    return sections
+
+
+def _table_rows(block: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+    """First markdown table in *block* → (header row, separator row, data rows)."""
+    header = sep = None
+    data: List[str] = []
+    for line in block.splitlines():
+        s = line.rstrip()
+        if not s.lstrip().startswith("|"):
+            continue
+        if header is None:
+            header = s
+        elif sep is None:
+            sep = s
+        else:
+            data.append(s)
+    return header, sep, data
+
+
+def _enforcement_bullet_lines(block: str) -> List[str]:
+    """Bullet lines in an Enforcement Summary block — anything that isn't the
+    italic "…and N more" line, the "**Summary:**" line, or a table row."""
+    return [
+        line.strip() for line in block.splitlines()
+        if line.strip() and not line.strip().startswith(("*", "#", "|"))
+    ]
+
+
+def _mermaid_body(block: str) -> str:
+    m = re.search(r"```mermaid\n(.*?)```", block, re.DOTALL)
+    return m.group(1) if m else ""
+
+
+def _merge_mermaid_bodies(bodies: List[str]) -> str:
+    """Concatenate per-batch mermaid graphs into one, renaming node ids per
+    batch (``model_1`` → ``b0_model_1``) so batches never collide, and
+    deduping the (static, identical every time) ``classDef`` lines.
+
+    Node ids can appear more than once per line — as both endpoints of an
+    edge (``agent_4 -->|uses| model_7``), or as the subject of a ``class``
+    assignment — so renaming has to replace every whole-word occurrence of
+    a batch's declared ids in its own lines, not just a line's leading token.
+    """
+    node_def_lines: List[str] = []
+    other_lines: List[str] = []
+    classdef_lines: List[str] = []
+    seen_classdef: set = set()
+    for batch_idx, body in enumerate(bodies):
+        declared_ids = re.findall(r"^\s*(\w+)\s*[\[\(\{]", body, re.MULTILINE)
+        rename = {nid: f"b{batch_idx}_{nid}" for nid in declared_ids}
+        id_pattern = re.compile(r"\b(" + "|".join(re.escape(k) for k in rename) + r")\b") if rename else None
+
+        for raw_line in body.splitlines():
+            s = raw_line.strip()
+            if not s or s == "graph TD":
+                continue
+            if s.startswith("classDef"):
+                if s not in seen_classdef:
+                    seen_classdef.add(s)
+                    classdef_lines.append(s)
+                continue
+            renamed = id_pattern.sub(lambda m: rename[m.group(1)], s) if id_pattern else s
+            if re.match(r"^\w+\s*[\[\(\{]", s):
+                node_def_lines.append(renamed)
+            else:
+                other_lines.append(renamed)
+    lines = ["graph TD"] + [f"    {l}" for l in node_def_lines] + [f"    {l}" for l in other_lines]
+    if classdef_lines:
+        lines.append("")
+        lines.extend(f"    {l}" for l in classdef_lines)
+    return "\n".join(lines)
+
+
+def _dedupe_preserve_order(rows: List[str]) -> List[str]:
+    seen: set = set()
+    out: List[str] = []
+    for r in rows:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def _merge_batch_reports(
+    reports: List[str],
+    *,
+    total_violations: int,
+    total_remediation_actions: int,
+    total_elapsed: float,
+) -> str:
+    """Combine each batch's own full markdown report into one report with a
+    single Enforcement Summary, Section 1 (AIBOM Discovery), Section 2
+    (Policy Violations), Section 3 (Controls Enforced), relationship graph,
+    and phase timing — rather than showing one full report per batch.
+    """
+    reports = [r for r in reports if r and r.strip()]
+    if not reports:
+        return ""
+    if len(reports) == 1:
+        return reports[0]
+
+    project_scanned = ""
+    enforcement_bullets: List[str] = []
+    s1_header = s1_sep = None
+    s1_rows: List[str] = []
+    s2_header = s2_sep = None
+    s2_rows: List[str] = []
+    s3_header = s3_sep = None
+    s3_rows: List[str] = []
+    mermaid_bodies: List[str] = []
+    phase_totals: Dict[str, float] = {}
+    phase_order: List[str] = []
+
+    for report in reports:
+        sections = _split_report_sections(report)
+        if not project_scanned:
+            m = re.search(r"\*\*Project Scanned:\*\*\s*`([^`]*)`", sections.get("__preamble__", ""))
+            if m:
+                project_scanned = m.group(1)
+
+        enforcement_bullets.extend(_enforcement_bullet_lines(sections.get("## Enforcement Summary", "")))
+
+        h, sep, rows = _table_rows(sections.get("### SECTION 1: AIBOM Discovery", ""))
+        s1_header, s1_sep = s1_header or h, s1_sep or sep
+        s1_rows.extend(rows)
+
+        h, sep, rows = _table_rows(sections.get("### SECTION 2: Policy Violations", ""))
+        s2_header, s2_sep = s2_header or h, s2_sep or sep
+        s2_rows.extend(rows)
+
+        h, sep, rows = _table_rows(sections.get("### SECTION 3: Controls Enforced", ""))
+        s3_header, s3_sep = s3_header or h, s3_sep or sep
+        s3_rows.extend(rows)
+
+        mermaid_bodies.append(_mermaid_body(sections.get("### AI Component Relationship Graph", "")))
+
+        _, _, phase_rows = _table_rows(sections.get("### Phase Timing", ""))
+        for row in phase_rows:
+            cells = [c.strip() for c in row.strip().strip("|").split("|")]
+            if len(cells) != 2:
+                continue
+            phase = cells[0].strip("*").strip()
+            m = re.match(r"([\d.]+)", cells[1].strip("*").strip())
+            if not m or phase.lower() == "total":
+                continue
+            if phase not in phase_totals:
+                phase_order.append(phase)
+            phase_totals[phase] = phase_totals.get(phase, 0.0) + float(m.group(1))
+
+    s1_rows = _dedupe_preserve_order(s1_rows)
+    s2_rows = _dedupe_preserve_order(s2_rows)
+    s3_rows = _dedupe_preserve_order(s3_rows)
+
+    lines: List[str] = ["# LINEAJE AI POLICY REPORT", ""]
+    status = "violations_found" if total_violations else "compliant"
+    lines.append(
+        f"**Run summary:** `{status}` · violations={total_violations} · "
+        f"remediation_actions={total_remediation_actions} · elapsed={total_elapsed:.1f}s"
+    )
+    lines.append("")
+    if project_scanned:
+        lines.append(f"**Project Scanned:** `{project_scanned}`")
+        lines.append("")
+    lines.append(f"**Total Time:** {total_elapsed:.1f}s")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## Enforcement Summary")
+    lines.append("")
+    preview = enforcement_bullets[:_ENFORCEMENT_PREVIEW_CAP]
+    for bullet in preview:
+        lines.append(bullet)
+        lines.append("")
+    # total_violations, not len(enforcement_bullets): each batch's own report
+    # already caps its bullet list at _ENFORCEMENT_PREVIEW_CAP server-side, so
+    # the pooled bullets alone would understate how many violations remain.
+    remaining = total_violations - len(preview)
+    if remaining > 0:
+        lines.append(f"*… and {remaining} more violation(s) — see **SECTION 3: Controls Enforced** below.*")
+        lines.append("")
+    lines.append(f"**Summary:** {len(preview)} notified")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("### SECTION 1: AIBOM Discovery")
+    lines.append("")
+    lines.append("#### AI Components")
+    lines.append("")
+    if s1_header:
+        lines.extend([s1_header, s1_sep, *s1_rows])
+    lines.append("")
+    lines.append("### SECTION 2: Policy Violations")
+    lines.append("")
+    lines.append("*Each row is one **`policy_violation=true`** finding (file × policy).*")
+    lines.append("")
+    if s2_header:
+        lines.extend([s2_header, s2_sep, *s2_rows])
+    lines.append("")
+    lines.append("### SECTION 3: Controls Enforced")
+    lines.append("")
+    lines.append("#### Controls enforced")
+    lines.append("")
+    if s3_header:
+        lines.extend([s3_header, s3_sep, *s3_rows])
+    lines.append("")
+    lines.append("### AI Component Relationship Graph")
+    lines.append("")
+    lines.append("```mermaid")
+    lines.append(_merge_mermaid_bodies(mermaid_bodies))
+    lines.append("```")
+    lines.append("")
+    lines.append("### Phase Timing")
+    lines.append("")
+    lines.append("| Phase | Time |")
+    lines.append("|-------|------|")
+    for phase in phase_order:
+        lines.append(f"| {phase} | {phase_totals[phase]:.1f}s |")
+    lines.append(f"| **Total** | **{sum(phase_totals.values()):.1f}s** |")
+    lines.append("")
+
+    return "\n".join(lines)
+
+# ===========================================================================
 # JSON output
 # ===========================================================================
 
@@ -1996,7 +2248,12 @@ def _execute_scan(args: argparse.Namespace) -> int:
         elapsed, len(all_violations), len(all_aibom), failed_batches_count,
     )
 
-    combined_report = "\n\n---\n\n".join(r for r in all_reports if r)
+    combined_report = _merge_batch_reports(
+        all_reports,
+        total_violations=len(all_violations),
+        total_remediation_actions=len(all_remediation_actions),
+        total_elapsed=elapsed,
+    )
 
     if failed_batches_count and not all_violations:
         output = build_json_output(
