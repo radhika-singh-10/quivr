@@ -1,3 +1,23 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+# Each enforce() call site below carries a SiteDescriptor with:
+#   site_id            deterministic id for this exact call site (file +
+#                      symbol + insertion point + pattern) — stable across
+#                      re-scans, used to dedupe stub insertions and to look
+#                      up this site's policy mapping at runtime.
+#   candidate_policies policy IDs this site matched during the scan.
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 from uuid import uuid4
 
 import pytest
@@ -58,6 +78,10 @@ async def test_quivrqaraglanggraph(
 ):
     # Making sure the model
     llm_config = LLMEndpointConfig(model="gpt-4o")
+    # LINEAJE: enforce() `llm_config` at agent->tool pre_tool — scan flagged AI_IAC_024 (General purpose AI model integrations must reference a model card or technical documentation). Mask/block; do not remove without review. site_id='site:sha256:aa793acc81a8e0bdd5c5c18354894dfa87462f0b404619cad7aeab7dea6e0363'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:aa793acc81a8e0bdd5c5c18354894dfa87462f0b404619cad7aeab7dea6e0363', phase='pre_tool', boundary={'source': 'agent_message', 'sink': 'tool_result'}, candidate_policies=[{'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='ALLOW_WITH_AUDIT', source_type='agent', destination_type='tool')
+    llm_config = _gr_client.enforce(_gr_site, llm_config, content_type='application/json', variable_name='llm_config', source_file=__file__, before_line=61)
     llm = LLMEndpoint.from_config(llm_config)
     retrieval_config = RetrievalConfig(llm_config=llm_config)
     chat_history = ChatHistory(uuid4(), uuid4())
