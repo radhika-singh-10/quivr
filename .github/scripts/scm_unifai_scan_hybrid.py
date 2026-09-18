@@ -126,10 +126,6 @@ def _mcp_http_client_with_extra_ca(headers=None, timeout=None, auth=None):
         verify = ctx
 
     kwargs: Dict[str, Any] = {"follow_redirects": True, "verify": verify}
-    # streamablehttp_client (mcp SDK) always passes an explicit httpx.Timeout here
-    # (built from its own timeout/sse_read_timeout params) — this default (matching
-    # the SDK's own bare defaults: 30s connect, 300s read) only matters if this
-    # factory is ever called directly.
     kwargs["timeout"] = timeout if timeout is not None else httpx.Timeout(30, read=300)
     if headers is not None:
         kwargs["headers"] = headers
@@ -138,18 +134,7 @@ def _mcp_http_client_with_extra_ca(headers=None, timeout=None, auth=None):
     return httpx.AsyncClient(**kwargs)
 
 
-# ``streamablehttp_client`` (this exact name) was a deprecated alias for the
-# canonical ``streamable_http_client`` in the ``mcp`` PyPI package. Some ``mcp``
-# releases have removed the deprecated alias outright, which breaks on any
-# environment that installs ``mcp`` unpinned (e.g. a fresh host picking up
-# whatever's newest — confirmed live: mcp==2.2.0 raises "ImportError: cannot
-# import name 'streamablehttp_client' from 'mcp.client.streamable_http'").
-# Reimplemented here against the still-supported ``streamable_http_client`` so
-# the call sites below keep working unchanged regardless of which alias the
-# installed mcp version kept. Logic mirrors the (now possibly-removed)
-# deprecated wrapper's own implementation exactly — same signature, same
-# behavior — and defaults to _mcp_http_client_with_extra_ca so the CA/insecure
-# handling above still applies without every call site repeating it.
+
 from contextlib import asynccontextmanager as _asynccontextmanager
 from datetime import timedelta as _timedelta
 
@@ -181,12 +166,6 @@ async def _streamablehttp_client_compat(
         async with streamable_http_client(
             url, http_client=client, terminate_on_close=terminate_on_close,
         ) as streams:
-            # mcp==2.2.0's streamable_http_client yields a 2-tuple
-            # (read_stream, write_stream) — the get_session_id_callback third
-            # element was dropped from the yield entirely (older/other mcp
-            # versions may still yield 3). Normalize to 3 here so every call
-            # site's `async with ... as (read, write, _):` keeps working
-            # unchanged regardless of which shape the installed version uses.
             if len(streams) == 2:
                 streams = (*streams, None)
             yield streams
@@ -586,7 +565,7 @@ def create_batch_archive(
     source_code_repo: str,
     branch: str,
     head_sha: str,
-    batch_index: int = 0,
+    batch_index: Any = 0,
     run_id: str = "",
 ) -> str:
     archive_path = os.path.join(archive_dir, f"repo_scan_batch_{batch_index}.zip")
@@ -606,7 +585,7 @@ def create_batch_archive(
         }
         zf.writestr("user_metadata.json", json.dumps(metadata, indent=2))
     size_kb = os.path.getsize(archive_path) // 1024
-    logger.info("Batch archive #%d: %d files, %d KB", batch_index, len(file_subset), size_kb)
+    logger.info("Batch archive #%s: %d files, %d KB", batch_index, len(file_subset), size_kb)
     return archive_path
 
 
@@ -715,6 +694,38 @@ def _upload_to_s3(presigned_url: str, archive_path: str) -> None:
             if resp.status not in (200, 204):
                 raise RuntimeError(f"S3 upload failed: HTTP {resp.status}")
     logger.debug("S3 upload complete")
+
+
+def _is_payload_too_large(exc: BaseException) -> bool:
+    """True when exc is (or wraps) an HTTP 413 from the MCP endpoint.
+
+    The ``mcp`` SDK's StreamableHTTPSessionManager hard-caps request bodies at
+    4 MiB and 413s anything bigger before it ever reaches application code —
+    archive_content_base64 (used in hybrid mode, where source never touches
+    S3) routes the whole archive through that same request body, so a batch
+    whose files happen to be large enough hits this cap. Retrying the
+    identical payload would just 413 again; the caller should split the batch
+    in half instead.
+    """
+    cause = exc
+    while hasattr(cause, "exceptions") and cause.exceptions:
+        cause = cause.exceptions[0]
+    try:
+        import httpx
+        if isinstance(cause, httpx.HTTPStatusError) and cause.response is not None:
+            return cause.response.status_code == 413
+    except Exception:
+        pass
+    text = str(cause)
+    return "413" in text and ("Request Entity Too Large" in text or "Request body too large" in text)
+
+
+def _split_batch_in_half(batch_files: List[str]) -> Optional[Tuple[List[str], List[str]]]:
+    """Split a 413-retry batch in half. None when it cannot be split further."""
+    if len(batch_files) < 2:
+        return None
+    mid = len(batch_files) // 2
+    return batch_files[:mid], batch_files[mid:]
 
 
 def _loads_scan_payload(raw: str) -> dict:
@@ -998,8 +1009,6 @@ def apply_stub_insertions_to_clone(
             lines = fh.readlines()
         ext = pathlib.Path(rel_path).suffix.lower()
 
-        # Insert bottom-up so an earlier insertion never shifts a later hit's
-        # (already-captured) line number out from under it.
         sorted_hits = sorted(_collapse_stub_hits(hits), key=lambda h: h.get("line", 0), reverse=True)
         needs_import = False
         for hit in sorted_hits:
@@ -1074,7 +1083,7 @@ def _ensure_refresh_token_in_validated_fixes(
         data = {}
     existing = str(data.get("refreshtoken") or data.get("refresh_token") or "").strip()
     keep = _usable_scan_refresh_token(existing)
-    token = keep or rt
+    token = rt or keep
     if not token:
         logger.warning(
             "No SCIM refresh token for %s — set LINEAJE_PAT_TOKEN "
@@ -1083,7 +1092,14 @@ def _ensure_refresh_token_in_validated_fixes(
         )
         return
     data.setdefault("contract_version", "2.0")
-    base = str(data.get("gr_service_url") or "").strip().rstrip("/") or _HARDCODED_GR_ORIGIN
+    # Likewise: this script's own MCP_SERVER_URL origin (_HARDCODED_GR_ORIGIN,
+    # the VM this scan actually ran against) wins over whatever gr_service_url
+    # the server wrote. The server's own resolver deliberately excludes
+    # loopback origins (e.g. --mcp-server-url https://localhost/mcp, used to
+    # route around Azure's public-IP hairpin-NAT limitation) and falls back to
+    # its hardcoded hosted SaaS origin instead — which is never reachable from
+    # wherever the customer's own runtime guardrail stub actually executes.
+    base = _HARDCODED_GR_ORIGIN or str(data.get("gr_service_url") or "").strip().rstrip("/")
     data["gr_service_url"] = base
     data["enforce_endpoint"] = f"{base}/enforce"
     data["refreshtoken"] = token
@@ -1135,8 +1151,8 @@ def _run_mcp_scan_via_client(
         resolved_run_id = (run_id or "").strip()
         if resolved_run_id:
             upload_args["run_id"] = resolved_run_id
-        # Only known to the SCM/CI script — surfaces the pipeline's own commit
-        # sha to the server the same way gha_repo_scan.py does.
+        with open(archive_path, "rb") as _fh:
+            upload_args["archive_content_base64"] = base64.b64encode(_fh.read()).decode("ascii")
         scm_headers: Dict[str, str] = {"X-Unifai-Commit-Sha": head_sha} if head_sha else {}
 
         tok1 = bearer_getter()
@@ -1156,8 +1172,10 @@ def _run_mcp_scan_via_client(
                 resolved_sbom = (upload_result.get("sbom_id") or resolved_sbom or "").strip()
                 resolved_run_id = (upload_result.get("run_id") or resolved_run_id or "").strip()
 
-        # logger.info("MCP step 2/3: upload to S3")
-        _upload_to_s3(presigned_url, archive_path)
+
+        if presigned_url:
+            # logger.info("MCP step 2/3: upload to S3")
+            _upload_to_s3(presigned_url, archive_path)
 
         tok2 = bearer_getter()
         sse_timeout = int(os.environ.get("UNIFAI_MCP_SSE_READ_TIMEOUT", "1800"))
@@ -1243,12 +1261,12 @@ def parallel_batch_scan(
     lock = threading.Lock()
     scan_sbom_id = ""
 
-    def _scan_one(batch_idx: int, batch_files: List[str]) -> Tuple[int, Dict[str, Any]]:
+    def _scan_leaf(label: str, batch_files: List[str]) -> Dict[str, Any]:
         nonlocal scan_sbom_id
-        logger.info("Batch %d/%d: %d files", batch_idx, len(batches), len(batch_files))
+        logger.info("Batch %s/%d: %d files", label, len(batches), len(batch_files))
         archive_path = create_batch_archive(
             source_dir, temp_dir, batch_files,
-            source_code_repo, branch, head_sha, batch_idx, run_id=run_id,
+            source_code_repo, branch, head_sha, label, run_id=run_id,
         )
         result = run_mcp_scan(
             server_url, bearer_getter, source_code_repo, branch, batch_files, archive_path,
@@ -1258,9 +1276,32 @@ def parallel_batch_scan(
             resolved_sbom = (result.get("sbom_id") or "").strip()
             if resolved_sbom and not scan_sbom_id:
                 scan_sbom_id = resolved_sbom
-        return batch_idx, result
+        return result
 
-    def _collect(batch_idx: int, mcp_result: Dict[str, Any]) -> None:
+    def _scan_one(batch_idx: int, batch_files: List[str]) -> Tuple[int, List[Tuple[str, Dict[str, Any]]]]:
+        """Scan a top-level batch, splitting in half and retrying on 413
+        (request too large for the mcp SDK's 4 MiB body cap) until every leaf
+        either succeeds or can't be split further. Returns one (label,
+        result) pair per leaf batch that was actually sent."""
+
+        def _run(label: str, files: List[str]) -> List[Tuple[str, Dict[str, Any]]]:
+            try:
+                return [(label, _scan_leaf(label, files))]
+            except BaseException as exc:
+                split = _split_batch_in_half(files) if _is_payload_too_large(exc) else None
+                if not split:
+                    raise
+                first_half, second_half = split
+                logger.warning(
+                    "Batch %s: 413 Request Entity Too Large (%d files) — "
+                    "splitting into %d + %d files and retrying each half",
+                    label, len(files), len(first_half), len(second_half),
+                )
+                return _run(f"{label}a", first_half) + _run(f"{label}b", second_half)
+
+        return batch_idx, _run(str(batch_idx), batch_files)
+
+    def _collect(label: str, mcp_result: Dict[str, Any]) -> None:
         batch_actions = mcp_result.get("remediation_actions", [])
         batch_violations = list(mcp_result.get("violations") or [])
         if not batch_violations:
@@ -1273,8 +1314,8 @@ def parallel_batch_scan(
         batch_aibom = mcp_result.get("aibom", [])
         batch_stub_insertions = _stub_insertions_from_mcp_result(mcp_result)
         logger.info(
-            "Batch %d/%d done: status=%s violations=%d aibom=%d stub_insertions=%d",
-            batch_idx, len(batches), mcp_result.get("status", "unknown"),
+            "Batch %s/%d done: status=%s violations=%d aibom=%d stub_insertions=%d",
+            label, len(batches), mcp_result.get("status", "unknown"),
             len(batch_violations), len(batch_aibom), len(batch_stub_insertions),
         )
         with lock:
@@ -1295,8 +1336,9 @@ def parallel_batch_scan(
         for future in as_completed(future_map):
             batch_idx = future_map[future]
             try:
-                _, mcp_result = future.result()
-                _collect(batch_idx, mcp_result)
+                _, leaf_results = future.result()
+                for label, mcp_result in leaf_results:
+                    _collect(label, mcp_result)
             except BaseException as exc:
                 failed_batch_count += 1
                 detail = f"Batch {batch_idx}/{len(batches)} failed: {_describe_exception(exc)}"
@@ -1511,9 +1553,6 @@ def _merge_batch_reports(
     for bullet in preview:
         lines.append(bullet)
         lines.append("")
-    # total_violations, not len(enforcement_bullets): each batch's own report
-    # already caps its bullet list at _ENFORCEMENT_PREVIEW_CAP server-side, so
-    # the pooled bullets alone would understate how many violations remain.
     remaining = total_violations - len(preview)
     if remaining > 0:
         lines.append(f"*… and {remaining} more violation(s) — see **SECTION 3: Controls Enforced** below.*")
@@ -1649,11 +1688,6 @@ def print_human_output(output: Dict[str, Any]) -> None:
     by_file: Dict[str, List[str]] = defaultdict(list)
     for v in violations:
         file_ = v.get("file") or v.get("file_path") or "(unknown)"
-        # The server's violation dicts key the policy name as "policy_name"
-        # (occasionally "policy_id" only) — "control" is a remediation_actions
-        # field, not a violations one, so reading it here always missed and
-        # printed "(unknown)" for every row. Mirrors gha_repo_scan.py's
-        # _violation_file_line_and_control fallback chain.
         control = v.get("policy_name") or v.get("control") or v.get("policy_id") or "(unknown)"
         by_file[file_].append(control)
 
@@ -2040,9 +2074,6 @@ def _create_fix_pr(
     sha_short = head_sha[:7]
     timestamp = time.strftime("%m%d%H%M")
     remediation_branch = f"{REMEDIATION_BRANCH_PREFIX}-{safe_branch.replace('/', '-')}-{sha_short}-{timestamp}"
-
-    # Creating a ref requires the full 40-char object id. Build.SourceVersion
-    # already is one, so this only matters when --head-sha was passed by hand.
     if len(head_sha) < 40:
         resolved: Optional[str] = None
         try:
@@ -2108,11 +2139,6 @@ def _create_fix_pr(
         "",
         failed_list,
     ])
-
-    # Azure DevOps caps PR descriptions at 4000 characters and does not render
-    # the <details> element the GitHub edition used, so the report only rides
-    # along when it fits. The pipeline publishes the full text as the
-    # unifai-report artifact either way.
     if report:
         heading = "\n\n---\n\n### Scan report\n\n"
         tail = "\n\n---\n\n*Full scan report: see the `unifai-report` artifact on the pipeline run.*"
@@ -2317,8 +2343,6 @@ def _execute_scan(args: argparse.Namespace) -> int:
             ("SYSTEM_TEAMPROJECT / --project", project),
         ] if not v]
 
-    # Write .lineaje/guardrail.json only when a PR was requested — a plain
-    # scan must not modify the input branch's working tree.
     if should_create_pr:
         _ensure_refresh_token_in_validated_fixes(
             validated_fixes, os.environ.get("LINEAJE_PAT_TOKEN", ""), source_path,
