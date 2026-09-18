@@ -1,3 +1,23 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+# Each enforce() call site below carries a SiteDescriptor with:
+#   site_id            deterministic id for this exact call site (file +
+#                      symbol + insertion point + pattern) — stable across
+#                      re-scans, used to dedupe stub insertions and to look
+#                      up this site's policy mapping at runtime.
+#   candidate_policies policy IDs this site matched during the scan.
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 import logging
 import os
 import time
@@ -53,8 +73,13 @@ class LLMTokenizer:
 
                     self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_hub)
             except OSError:  # if we don't manage to connect to huggingface and/or no cached models are present
+                _lineaje_payload = f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_IAC_015 (Enforce URL allowlists for agent fetches, tools, and outbound HTTP.). Mask/block; do not remove without review. site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
                 logger.warning(
-                    f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
+                    _lineaje_payload
                 )
                 self.tokenizer = tiktoken.get_encoding(self.fallback_tokenizer)
         else:
@@ -81,7 +106,12 @@ class LLMTokenizer:
                 try:
                     total_size += os.path.getsize(file_path)
                 except (OSError, FileNotFoundError):
-                    logger.debug(f"Could not access tokenizer file: {file_path}")
+                    _lineaje_payload = f"Could not access tokenizer file: {file_path}"
+                    # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_IAC_015 (Enforce URL allowlists for agent fetches, tools, and outbound HTTP.). Mask/block; do not remove without review. site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8'
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+                    logger.debug(_lineaje_payload)
 
         return total_size if total_size > 0 else self._default_size
 
@@ -93,6 +123,10 @@ class LLMTokenizer:
         if cache_key in cls._cache:
             tokenizer, size, _ = cls._cache[cache_key]
             cls._cache[cache_key] = (tokenizer, size, time.time())
+            # LINEAJE: enforce() `tokenizer` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:42aa2857bf600e5ddc797debb910096c6af6fec90269378227a80c372d8a984f'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:42aa2857bf600e5ddc797debb910096c6af6fec90269378227a80c372d8a984f', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            tokenizer = _gr_client.enforce(_gr_site, tokenizer, content_type='text/plain')
             return tokenizer
 
         # Create new instance
@@ -116,6 +150,10 @@ class LLMTokenizer:
         # Add new instance to cache with current timestamp
         cls._cache[cache_key] = (instance, instance._size_bytes, time.time())
         cls._current_cache_size += instance._size_bytes
+        # LINEAJE: enforce() `instance` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        instance = _gr_client.enforce(_gr_site, instance, content_type='text/plain')
         return instance
 
     @classmethod
@@ -177,13 +215,23 @@ class LLMTokenizer:
         for hub in unique_tokenizer_hubs:
             try:
                 cls.load(hub, LLMEndpointConfig._FALLBACK_TOKENIZER)
-                logger.info(
-                    f"Successfully preloaded tokenizer: {hub}. "
+                _lineaje_payload = (f"Successfully preloaded tokenizer: {hub}. "
                     f"Total cache size: {cls._current_cache_size / (1024 * 1024):.2f} MB. "
-                    f"Cache count: {len(cls._cache)}"
+                    f"Cache count: {len(cls._cache)}")
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_IAC_015 (Enforce URL allowlists for agent fetches, tools, and outbound HTTP.). Mask/block; do not remove without review. site_id='site:sha256:2800f44e8702e107f333e4dad839f6da19f2f6057729eae69d9f44f9df695d36'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:2800f44e8702e107f333e4dad839f6da19f2f6057729eae69d9f44f9df695d36', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+                logger.info(
+                    _lineaje_payload
                 )
             except Exception as e:
-                logger.warning(f"Failed to preload tokenizer {hub}: {str(e)}")
+                _lineaje_payload = f"Failed to preload tokenizer {hub}: {str(e)}"
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_IAC_015 (Enforce URL allowlists for agent fetches, tools, and outbound HTTP.). Mask/block; do not remove without review. site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
+                logger.warning(_lineaje_payload)
 
 
 class LLMEndpoint:
@@ -305,6 +353,10 @@ class LLMEndpoint:
             instance = cls(llm=_llm, llm_config=config)
             cls._cache[hashed_config] = instance
 
+            # LINEAJE: enforce() `instance` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_015', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            instance = _gr_client.enforce(_gr_site, instance, content_type='text/plain')
             return instance
 
         except ImportError as e:
