@@ -35,7 +35,7 @@ max_history: 10
 
 # Configuration for the LLM (Ollama OpenAI-compatible API)
 llm_config:
-  model: llama3.2
+  model: qwen3.5
   llm_base_url: http://localhost:11434/v1
   llm_api_key: ollama
   max_output_tokens: 8192
