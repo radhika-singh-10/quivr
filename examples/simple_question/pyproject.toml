@@ -8,6 +8,7 @@ authors = [
 dependencies = [
     "quivr-core @ file:///${PROJECT_ROOT}/../../core",
     "python-dotenv>=1.0.1",
+    "langchain-ollama>=0.2,<0.4",
 ]
 readme = "README.md"
 requires-python = ">= 3.11"
