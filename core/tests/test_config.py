@@ -34,11 +34,44 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
     bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_REFRESH_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
     params_key = "out_params" if destination_type == "agent" else "in_params"
+    def _gr_js(o):
+        # JSON form of non-JSON payloads (LangChain Document, pydantic models, ...).
+        if hasattr(o, "page_content"):
+            return {"page_content": o.page_content, "metadata": getattr(o, "metadata", None) or {}}
+        for _m in ("model_dump", "dict", "to_dict"):
+            _f = getattr(o, _m, None)
+            if callable(_f):
+                try:
+                    return _f()
+                except Exception:
+                    pass
+        if isinstance(o, (set, tuple)):
+            return list(o)
+        return str(o)
+    def _gr_back(orig, new):
+        # Map the (possibly masked) JSON back onto the caller's own objects.
+        if new == _j.loads(_j.dumps(orig, default=_gr_js)):
+            return orig
+        if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
+            _out = [_gr_back(a, b) for a, b in zip(orig, new)]
+            return tuple(_out) if isinstance(orig, tuple) else _out
+        if hasattr(orig, "page_content") and isinstance(new, dict) and "page_content" in new:
+            import copy as _cp
+            _c = _cp.copy(orig)
+            _c.page_content = new["page_content"]
+            if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
+                _c.metadata = new["metadata"]
+            return _c
+        if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
+            return new
+        _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
+        return orig
     try:
         headers = {"Content-Type": "application/json"}
         if bearer:
             headers["Authorization"] = "Bearer " + bearer
-        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": data}}
+        _sent = _j.loads(_j.dumps(data, default=_gr_js))
+        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": _sent}}
         for _k, _v in context.items():
             if _v:
                 body[_k] = _v
@@ -46,7 +79,7 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             body["tenant_id"] = tid
         _base = url.rstrip("/")
         if _base.lower().endswith("/enforce"): _base = _base[: -len("/enforce")].rstrip("/")
-        req = _ur.Request(_base + "/enforce", data=_j.dumps(body).encode(), headers=headers, method="POST")
+        req = _ur.Request(_base + "/enforce", data=_j.dumps(body, default=_gr_js).encode(), headers=headers, method="POST")
         with _ur.urlopen(req, timeout=timeout) as resp:
             result = _j.loads(resp.read())
     except Exception as exc:
@@ -65,7 +98,9 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
         return data
     if result.get("status") == "escalate":
         _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
-    return result.get("result", {}).get("data", data)
+    if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
+        return data
+    return _gr_back(data, result["result"]["data"])
 from quivr_core.rag.entities.config import LLMEndpointConfig, RetrievalConfig
 
 
