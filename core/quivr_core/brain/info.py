@@ -32,7 +32,7 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     if not url:
         return data
     tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
-    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
+    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_REFRESH_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
     params_key = "out_params" if destination_type == "agent" else "in_params"
     try:
         headers = {"Content-Type": "application/json"}
