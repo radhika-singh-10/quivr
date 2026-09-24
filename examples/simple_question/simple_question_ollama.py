@@ -60,7 +60,7 @@ if __name__ == "__main__":
         pass
     except PermissionError:
         raise
-    question = " ".join(_lineaje_payload_55) or "what is gold? answer in french"
+    question = """what is gold? answer in french"""
 
     llm_config = LLMEndpointConfig(
         supplier=DefaultModelSuppliers.OPENAI,  # only used for config lookups

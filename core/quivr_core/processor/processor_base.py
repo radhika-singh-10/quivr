@@ -11,12 +11,6 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     hop_label = source_type + "->" + destination_type
     _prior = getattr(gr_check, "_blocked", None)
     if _prior:
-        try:
-            hop_label = gr_check(hop_label, "agent", "log", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:c09f93fbfcb592f2f66776d6c89570b3dd0e476a9101c59dd8fc7624a58ef920')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            hop_label = hop_label
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
         raise GRBlockedError(_prior[0], _prior[1])
     def _blk(o):
@@ -31,12 +25,6 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             pass
         return False
     if _blk(data) or _blk(context):
-        try:
-            hop_label = gr_check(hop_label, "agent", "log", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:40ef0b2a461d511fe2d8925db7add3ed0961d71ffe8b3c15c7b7accb6c9d8144')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            hop_label = hop_label
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
         gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
         raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
@@ -66,12 +54,6 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     def _gr_back(orig, new):
         # Map the (possibly masked) JSON back onto the caller's own objects.
         if new == _j.loads(_j.dumps(orig, default=_gr_js)):
-            try:
-                orig = gr_check(orig, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:e02f2242cb6eb7b95f14deb998b876facfa11cc622adba4ee381b1a8bd3a0dcf')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                orig = orig
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
             return orig
         if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
             _out = [_gr_back(a, b) for a, b in zip(orig, new)]
@@ -82,28 +64,10 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             _c.page_content = new["page_content"]
             if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
                 _c.metadata = new["metadata"]
-            try:
-                _c = gr_check(_c, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:a0d72a75e758888fc7cae2bfba857aeed8b8348c12c5758587c5ef4a0e73a7f2')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                _c = _c
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
             return _c
         if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
-            try:
-                new = gr_check(new, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:a0d72a75e758888fc7cae2bfba857aeed8b8348c12c5758587c5ef4a0e73a7f2')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                new = new
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
             return new
         _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
-        try:
-            orig = gr_check(orig, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:a0d72a75e758888fc7cae2bfba857aeed8b8348c12c5758587c5ef4a0e73a7f2')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            orig = orig
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return orig
     try:
         headers = {"Content-Type": "application/json"}
@@ -128,46 +92,16 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             blocked_by = detail.get("blocked_by") or []
             policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
             reason = detail.get("message", "Request denied by policy enforcement.")
-            try:
-                hop_label = gr_check(hop_label, "agent", "log", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:9d2da73e4e0ada8b178aaf0e1feaedab57b360c75d4c2d89415cdd0066fd3c2a')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                hop_label = hop_label
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
             _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
             if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
-                try:
-                    data = gr_check(data, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:a0d72a75e758888fc7cae2bfba857aeed8b8348c12c5758587c5ef4a0e73a7f2')
-                except Exception as _gr_exc:
-                    if type(_gr_exc).__name__ == "GRBlockedError": raise
-                    data = data
-                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
                 return data
             gr_check._blocked = (policy_id, reason)
             raise GRBlockedError(policy_id, reason)
         _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
-        try:
-            data = gr_check(data, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:f82050ee35062cfc1f81c805ddc42540c93513746576036e6aa35b01194fade6')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            data = data
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return data
     if result.get("status") == "escalate":
-        try:
-            hop_label = gr_check(hop_label, "agent", "log", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:12e9e335ec20556f6cd9cb557252f431aa93f604ffc4fc3278205d77355fffcb')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            hop_label = hop_label
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
     if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
-        try:
-            data = gr_check(data, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:a0d72a75e758888fc7cae2bfba857aeed8b8348c12c5758587c5ef4a0e73a7f2')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            data = data
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return data
     return _gr_back(data, result["result"]["data"])
 import logging
