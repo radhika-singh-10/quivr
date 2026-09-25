@@ -1,3 +1,49 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
+class GRBlockedError(Exception):
+    def __init__(self, policy_id, reason):
+        self.policy_id, self.reason = policy_id, reason
+        super().__init__("Guardrail block for policy %r: %s" % (policy_id, reason))
+
+def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **context):
+    import json as _j, logging as _lg, os as _os, urllib.error as _ue, urllib.request as _ur
+    _log = _lg.getLogger("lineaje.gr_client")
+    url = _os.environ.get("GR_SERVICE_URL", "")
+    if not url:
+        return data
+    tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
+    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
+    hop_label = source_type + "->" + destination_type
+    params_key = "out_params" if destination_type == "agent" else "in_params"
+    try:
+        headers = {"Content-Type": "application/json"}
+        if bearer:
+            headers["Authorization"] = "Bearer " + bearer
+        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": data}}
+        for _k, _v in context.items():
+            if _v:
+                body[_k] = _v
+        if tid:
+            body["tenant_id"] = tid
+        req = _ur.Request(url.rstrip("/") + "/enforce", data=_j.dumps(body).encode(), headers=headers, method="POST")
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            result = _j.loads(resp.read())
+    except Exception as exc:
+        if isinstance(exc, _ue.HTTPError) and exc.code == 403:
+            try: detail = _j.loads(exc.read()).get("detail", {})
+            except Exception: detail = {}
+            blocked_by = detail.get("blocked_by") or []
+            policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
+            reason = detail.get("message", "Request denied by policy enforcement.")
+            _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
+            if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
+                return data
+            raise GRBlockedError(policy_id, reason)
+        _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
+        return data
+    if result.get("status") == "escalate":
+        _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
+    return result.get("result", {}).get("data", data)
 import asyncio
 import logging
 import os
@@ -66,11 +112,27 @@ async def process_files(
         try:
             if file.file_extension:
                 processor_cls = get_processor_class(file.file_extension)
+                _lineaje_payload = f"processing {file} using class {processor_cls.__name__}"
+                try:
+                    import asyncio as _gr_asyncio
+                    _lineaje_payload = await _gr_asyncio.to_thread(gr_check, _lineaje_payload, "agent", "log", site_id='site:sha256:f2691307f34833bb0a19cc007a6ae256946125c32bbecde051672c42abd5483f')
+                except Exception as _gr_exc:
+                    if type(_gr_exc).__name__ == "GRBlockedError": raise
+                    _lineaje_payload = _lineaje_payload
+                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
                 logger.debug(f"processing {file} using class {processor_cls.__name__}")
                 processor = processor_cls(**processor_kwargs)
                 docs = await processor.process_file(file)
                 knowledge.extend(docs.chunks)
             else:
+                _lineaje_payload = f"can't find processor for {file}"
+                try:
+                    import asyncio as _gr_asyncio
+                    _lineaje_payload = await _gr_asyncio.to_thread(gr_check, _lineaje_payload, "agent", "log", site_id='site:sha256:29d7a3e92f2def825dfd36011afa5f09d9b2c0a5cec8e364ded2bd062b644ac8')
+                except Exception as _gr_exc:
+                    if type(_gr_exc).__name__ == "GRBlockedError": raise
+                    _lineaje_payload = _lineaje_payload
+                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
                 logger.error(f"can't find processor for {file}")
                 if skip_file_error:
                     continue
@@ -82,6 +144,13 @@ async def process_files(
             else:
                 raise Exception(f"Can't parse {file}. No available processor") from e
 
+    try:
+        import asyncio as _gr_asyncio
+        knowledge = await _gr_asyncio.to_thread(gr_check, knowledge, "agent", "user_interface", site_id='site:sha256:f1f7dc277ae27ca95a324dd6853d1b8b4448161abf5fa588f627119f2235244e')
+    except Exception as _gr_exc:
+        if type(_gr_exc).__name__ == "GRBlockedError": raise
+        knowledge = knowledge
+        __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
     return knowledge
 
 
@@ -142,6 +211,12 @@ class Brain:
         console = Console()
         tree = self.info().to_tree()
         panel = Panel(tree, title="Brain Info", expand=False, border_style="bold")
+        try:
+            panel = gr_check(panel, "agent", "log", site_id='site:sha256:58fbf3b1e0fad1972301fe9bc0496080472651e594f7e823f0753c488ed36745')
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError": raise
+            panel = panel
+            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         console.print(panel)
 
     @classmethod
@@ -269,6 +344,13 @@ class Brain:
 
         with open(os.path.join(brain_path, "config.json"), "w") as f:
             f.write(bserialized.model_dump_json())
+        try:
+            import asyncio as _gr_asyncio
+            brain_path = await _gr_asyncio.to_thread(gr_check, brain_path, "agent", "user_interface", site_id='site:sha256:9164ca246d5e66e207c4f47febb7a28670e505a1420b76f4d13cd69eb5e5c882')
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError": raise
+            brain_path = brain_path
+            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return brain_path
 
     def info(self) -> BrainInfo:
@@ -345,6 +427,14 @@ class Brain:
             file = await load_qfile(brain_id, path)
             await storage.upload_file(file)
 
+        _lineaje_payload = f"uploaded all files to {storage}"
+        try:
+            import asyncio as _gr_asyncio
+            _lineaje_payload = await _gr_asyncio.to_thread(gr_check, _lineaje_payload, "agent", "log", site_id='site:sha256:f2691307f34833bb0a19cc007a6ae256946125c32bbecde051672c42abd5483f')
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError": raise
+            _lineaje_payload = _lineaje_payload
+            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         logger.debug(f"uploaded all files to {storage}")
 
         # Parse files
@@ -360,6 +450,14 @@ class Brain:
         else:
             await vector_db.aadd_documents(docs)
 
+        _lineaje_payload = f"added {len(docs)} chunks to vectordb"
+        try:
+            import asyncio as _gr_asyncio
+            _lineaje_payload = await _gr_asyncio.to_thread(gr_check, _lineaje_payload, "agent", "log", site_id='site:sha256:f2691307f34833bb0a19cc007a6ae256946125c32bbecde051672c42abd5483f')
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError": raise
+            _lineaje_payload = _lineaje_payload
+            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         logger.debug(f"added {len(docs)} chunks to vectordb")
 
         return cls(
