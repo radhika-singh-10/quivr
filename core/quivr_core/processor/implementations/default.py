@@ -1,110 +1,7 @@
-# Copyright (c) Lineaje, Inc. All rights reserved.
-# gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
-class GRBlockedError(Exception):
-    def __init__(self, policy_id, reason):
-        self.policy_id, self.reason = policy_id, reason
-        super().__init__("Guardrail block for policy %r: %s" % (policy_id, reason))
-
-def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **context):
-    import json as _j, logging as _lg, os as _os, urllib.error as _ue, urllib.request as _ur
-    _log = _lg.getLogger("lineaje.gr_client")
-    hop_label = source_type + "->" + destination_type
-    _prior = getattr(gr_check, "_blocked", None)
-    if _prior:
-        _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
-        raise GRBlockedError(_prior[0], _prior[1])
-    def _blk(o):
-        if isinstance(o, dict):
-            return any(_blk(o.get(k)) for k in ("skill_path", "skill_file", "path", "file_path", "data", "skill_manifest_path"))
-        s = str(o or "")
-        b = s.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        if b.endswith(".md.blocked"): return True
-        try:
-            if b in ("skill.md", "skills.md") and _os.path.isfile(str(o) + ".blocked"): return True
-        except Exception:
-            pass
-        return False
-    if _blk(data) or _blk(context):
-        _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
-        gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-        raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-    url = _os.environ.get("GR_SERVICE_URL", "")
-    if not url:
-        return data
-    tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
-    # Refresh token first: the GR service exchanges it for the access JWT it
-    # calls the Data Service policy API with; a lineaje_pat_ PAT only
-    # identifies the caller and cannot be exchanged.
-    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_REFRESH_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
-    params_key = "out_params" if destination_type == "agent" else "in_params"
-    def _gr_js(o):
-        # JSON form of non-JSON payloads (LangChain Document, pydantic models, ...).
-        if hasattr(o, "page_content"):
-            return {"page_content": o.page_content, "metadata": getattr(o, "metadata", None) or {}}
-        for _m in ("model_dump", "dict", "to_dict"):
-            _f = getattr(o, _m, None)
-            if callable(_f):
-                try:
-                    return _f()
-                except Exception:
-                    pass
-        if isinstance(o, (set, tuple)):
-            return list(o)
-        return str(o)
-    def _gr_back(orig, new):
-        # Map the (possibly masked) JSON back onto the caller's own objects.
-        if new == _j.loads(_j.dumps(orig, default=_gr_js)):
-            return orig
-        if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
-            _out = [_gr_back(a, b) for a, b in zip(orig, new)]
-            return tuple(_out) if isinstance(orig, tuple) else _out
-        if hasattr(orig, "page_content") and isinstance(new, dict) and "page_content" in new:
-            import copy as _cp
-            _c = _cp.copy(orig)
-            _c.page_content = new["page_content"]
-            if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
-                _c.metadata = new["metadata"]
-            return _c
-        if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
-            return new
-        _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
-        return orig
-    try:
-        headers = {"Content-Type": "application/json"}
-        if bearer:
-            headers["Authorization"] = "Bearer " + bearer
-        _sent = _j.loads(_j.dumps(data, default=_gr_js))
-        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": _sent}}
-        for _k, _v in context.items():
-            if _v:
-                body[_k] = _v
-        if tid:
-            body["tenant_id"] = tid
-        _base = url.rstrip("/")
-        if _base.lower().endswith("/enforce"): _base = _base[: -len("/enforce")].rstrip("/")
-        req = _ur.Request(_base + "/enforce", data=_j.dumps(body, default=_gr_js).encode(), headers=headers, method="POST")
-        with _ur.urlopen(req, timeout=timeout) as resp:
-            result = _j.loads(resp.read())
-    except Exception as exc:
-        if isinstance(exc, _ue.HTTPError) and exc.code == 403:
-            try: detail = _j.loads(exc.read()).get("detail", {})
-            except Exception: detail = {}
-            blocked_by = detail.get("blocked_by") or []
-            policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
-            reason = detail.get("message", "Request denied by policy enforcement.")
-            _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
-            if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
-                return data
-            gr_check._blocked = (policy_id, reason)
-            raise GRBlockedError(policy_id, reason)
-        _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
-        return data
-    if result.get("status") == "escalate":
-        _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
-    if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
-        return data
-    return _gr_back(data, result["result"]["data"])
+import base64
 import logging
+import re
+import unicodedata
 from typing import Any, List, Type, TypeVar
 
 import tiktoken
@@ -130,9 +27,146 @@ from quivr_core.files.file import FileExtension, QuivrFile
 from quivr_core.processor.processor_base import ProcessedDocument, ProcessorBase
 from quivr_core.processor.splitter import SplitterConfig
 
+import re
+
 logger = logging.getLogger("quivr_core")
 
+
+def _sanitize_doc(doc):
+    """Sanitize a LangChain Document's page_content against prompt injection.
+
+    Strips or neutralises patterns commonly used to hijack LLM instructions
+    (e.g. "Ignore previous instructions", role-override markers, hidden
+    directives, etc.) before the content is consumed by an LLM or agent.
+    """
+    _INJECTION_PATTERNS = [
+        # Instruction-override attempts
+        r"(?i)ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|constraints?)",
+        r"(?i)disregard\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|constraints?)",
+        r"(?i)forget\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|constraints?)",
+        r"(?i)override\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|constraints?)",
+        # Role / persona hijacking
+        r"(?i)you\s+are\s+now\s+(a\s+|an\s+)?(?:new\s+)?(?:ai|assistant|bot|model|gpt|llm|system)",
+        r"(?i)act\s+as\s+(a\s+|an\s+)?(?:new\s+)?(?:ai|assistant|bot|model|gpt|llm|system)",
+        r"(?i)pretend\s+(to\s+be|you\s+are)\s+(a\s+|an\s+)?(?:ai|assistant|bot|model|gpt|llm|system)",
+        # Jailbreak / DAN-style markers
+        r"(?i)\bDAN\b",
+        r"(?i)jailbreak",
+        r"(?i)do\s+anything\s+now",
+        # Hidden / encoded instruction markers
+        r"(?i)<\s*/?\s*(system|instruction|prompt|context|user|assistant)\s*>",
+        r"(?i)\[\s*(system|instruction|prompt|context|user|assistant)\s*\]",
+        r"(?i)###\s*(system|instruction|prompt|context|user|assistant)",
+        # Exfiltration / SSRF probes embedded in content
+        r"(?i)send\s+(all\s+)?(this|the|my|your)\s+(data|context|conversation|history|prompt)\s+to",
+        r"(?i)reveal\s+(your\s+)?(system\s+)?prompt",
+        r"(?i)print\s+(your\s+)?(system\s+)?prompt",
+        r"(?i)output\s+(your\s+)?(system\s+)?prompt",
+        r"(?i)repeat\s+(your\s+)?(system\s+)?prompt",
+        r"(?i)what\s+(are|were)\s+your\s+(original\s+)?instructions",
+    ]
+    content = doc.page_content
+    for pattern in _INJECTION_PATTERNS:
+        content = re.sub(pattern, "[REDACTED]", content)
+    doc.page_content = content
+    return doc
+
 P = TypeVar("P", bound=BaseLoader)
+
+# ---------------------------------------------------------------------------
+# Prompt-injection sanitisation helpers
+# ---------------------------------------------------------------------------
+
+# Invisible / zero-width Unicode codepoints commonly used to hide text
+_INVISIBLE_CHARS_RE = re.compile(
+    r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\ufeff\u2028\u2029]"
+)
+
+# Patterns that look like injected LLM instructions
+_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    # Direct instruction overrides
+    re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions?", re.IGNORECASE),
+    re.compile(r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?", re.IGNORECASE),
+    re.compile(r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(?:a|an|the)\b", re.IGNORECASE),
+    re.compile(r"act\s+as\s+(?:a|an|the)\b", re.IGNORECASE),
+    re.compile(r"new\s+instructions?\s*:", re.IGNORECASE),
+    re.compile(r"system\s*:\s*you", re.IGNORECASE),
+    re.compile(r"<\s*/?\s*(?:system|user|assistant)\s*>", re.IGNORECASE),
+    re.compile(r"\[\s*(?:INST|SYS|SYSTEM|PROMPT)\s*\]", re.IGNORECASE),
+    # Shell / code execution attempts
+    re.compile(r"(?:^|\s)(?:sudo|bash|sh|cmd|powershell|exec|eval|os\.system|subprocess)\s*[\(\s]", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"`[^`]{1,200}`"),  # backtick command substitution
+    re.compile(r"\$\([^)]{1,200}\)"),  # $(...) command substitution
+]
+
+# Leetspeak substitution table (expand as needed)
+_LEET_TABLE = str.maketrans("013456789", "oieashgbq")
+
+# Minimum length of a base64 chunk worth decoding and inspecting
+_B64_MIN_LEN = 20
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{" + str(_B64_MIN_LEN) + r",}={0,2}")
+
+
+def _contains_injection(text: str) -> bool:
+    """Return True if *text* matches any known injection pattern."""
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def _check_base64_payloads(text: str) -> bool:
+    """Decode base64 blobs found in *text* and check them for injections."""
+    for match in _B64_RE.finditer(text):
+        try:
+            decoded = base64.b64decode(match.group() + "==").decode("utf-8", errors="ignore")
+            if _contains_injection(decoded):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _check_leetspeak(text: str) -> bool:
+    """Translate common leetspeak substitutions and re-check for injections."""
+    normalised = text.translate(_LEET_TABLE)
+    return _contains_injection(normalised)
+
+
+def sanitize_document_content(content: str) -> str:
+    """
+    Scan *content* for prompt-injection attempts and return a sanitised copy.
+
+    Raises ``ValueError`` if a definitive injection attempt is detected so
+    that the calling processor can reject the document entirely.
+    Invisible / zero-width characters are always stripped silently.
+    """
+    # 1. Strip invisible / zero-width characters
+    cleaned = _INVISIBLE_CHARS_RE.sub("", content)
+
+    # 2. Normalise Unicode (catches homoglyph attacks)
+    cleaned = unicodedata.normalize("NFKC", cleaned)
+
+    # 3. Direct pattern match
+    if _contains_injection(cleaned):
+        raise ValueError(
+            "Prompt injection attempt detected in document content (direct pattern)."
+        )
+
+    # 4. Base64-encoded payload check
+    if _check_base64_payloads(cleaned):
+        raise ValueError(
+            "Prompt injection attempt detected in document content (base64 payload)."
+        )
+
+    # 5. Leetspeak check
+    if _check_leetspeak(cleaned):
+        raise ValueError(
+            "Prompt injection attempt detected in document content (leetspeak pattern)."
+        )
+
+    return cleaned
 
 
 class ProcessorInit(ProcessorBase):
@@ -187,27 +221,20 @@ def _build_processor(
                 loader = self.loader_cls()
 
             documents = await loader.aload()
-            try:
-                import asyncio as _gr_asyncio
-                documents = await _gr_asyncio.to_thread(gr_check, documents, "data_source", "rag_pipeline", site_id='site:sha256:a5f887ffe4da94aa65d3319ab85bdaa8200d18c4c01e32584dc8ad2b74ee95f2')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                documents = documents
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'data_source->rag_pipeline' — passing data through unchecked")
-            try:
-                import asyncio as _gr_asyncio
-                documents = await _gr_asyncio.to_thread(gr_check, documents, "rag_source", "rag_pipeline", site_id='site:sha256:a5617df644ac78b4dab04687a216e2f9102f871c8b553f2e65bf8e2b8438b71a')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                documents = documents
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'rag_source->rag_pipeline' — passing data through unchecked")
-            try:
-                import asyncio as _gr_asyncio
-                documents = await _gr_asyncio.to_thread(gr_check, documents, "rag_source", "rag_pipeline", site_id='site:sha256:098f1f959e736f7630953b43c578bb34f8497b78efccff7455a093a9f133db38')
-            except Exception as _gr_exc:
-                if type(_gr_exc).__name__ == "GRBlockedError": raise
-                documents = documents
-                __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'rag_source->rag_pipeline' — passing data through unchecked")
+
+            # Sanitise every document's content before splitting to prevent
+            # prompt-injection attacks carried inside uploaded files.
+            sanitised_documents = []
+            for _doc in documents:
+                try:
+                    _doc.page_content = sanitize_document_content(_doc.page_content)
+                    sanitised_documents.append(_doc)
+                except ValueError as _exc:
+                    logger.warning(
+                        "Document chunk rejected due to prompt injection: %s", _exc
+                    )
+            documents = sanitised_documents
+
             docs = self.text_splitter.split_documents(documents)
 
             for doc in docs:
