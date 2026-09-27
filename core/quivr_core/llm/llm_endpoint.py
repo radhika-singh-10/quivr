@@ -19,6 +19,171 @@ from quivr_core.rag.utils import model_supports_function_calling
 
 logger = logging.getLogger("quivr_core")
 
+import uuid as _ai_app_sec_035_uuid
+
+
+def _ai_app_sec_035_log_llm_interaction(
+    operation: str,
+    model: str,
+    request_id: str,
+    duration_s: float,
+    input_len: int,
+    output_len: int,
+    status: str,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+) -> None:
+    """Log LLM interaction metadata only — never log content."""
+    logger.info(
+        "llm_interaction",
+        extra={
+            "operation": operation,
+            "model": model,
+            "request_id": request_id,
+            "duration_s": round(duration_s, 4),
+            "input_len_chars": input_len,
+            "output_len_chars": output_len,
+            "status": status,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+    )
+
+
+class _ai_app_sec_035_LoggingLLM:
+    """Thin wrapper around a BaseChatModel that logs interaction metadata."""
+
+    def __init__(self, llm: "BaseChatModel", model_name: str):
+        self._llm = llm
+        self._model_name = model_name
+
+    # Proxy attribute access to the underlying LLM so duck-typing works.
+    def __getattr__(self, name: str):
+        return getattr(self._llm, name)
+
+    def invoke(self, input, config=None, **kwargs):
+        request_id = str(_ai_app_sec_035_uuid.uuid4())
+        input_str = str(input)
+        t0 = time.time()
+        try:
+            result = self._llm.invoke(input, config=config, **kwargs) if config is not None else self._llm.invoke(input, **kwargs)
+            duration = time.time() - t0
+            output_str = str(result.content) if hasattr(result, "content") else str(result)
+            usage = getattr(result, "usage_metadata", None) or getattr(result, "response_metadata", {}).get("usage", None)
+            prompt_tokens = completion_tokens = total_tokens = None
+            if usage:
+                prompt_tokens = getattr(usage, "input_tokens", None) or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
+                completion_tokens = getattr(usage, "output_tokens", None) or (usage.get("completion_tokens") if isinstance(usage, dict) else None)
+                total_tokens = getattr(usage, "total_tokens", None) or (usage.get("total_tokens") if isinstance(usage, dict) else None)
+            _ai_app_sec_035_log_llm_interaction(
+                operation="invoke",
+                model=self._model_name,
+                request_id=request_id,
+                duration_s=duration,
+                input_len=len(input_str),
+                output_len=len(output_str),
+                status="success",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+            return result
+        except Exception as exc:
+            duration = time.time() - t0
+            _ai_app_sec_035_log_llm_interaction(
+                operation="invoke",
+                model=self._model_name,
+                request_id=request_id,
+                duration_s=duration,
+                input_len=len(input_str),
+                output_len=0,
+                status=f"error:{type(exc).__name__}",
+            )
+            raise
+
+    def stream(self, input, config=None, **kwargs):
+        request_id = str(_ai_app_sec_035_uuid.uuid4())
+        input_str = str(input)
+        t0 = time.time()
+        chunks = []
+        try:
+            gen = self._llm.stream(input, config=config, **kwargs) if config is not None else self._llm.stream(input, **kwargs)
+            for chunk in gen:
+                chunks.append(chunk)
+                yield chunk
+            duration = time.time() - t0
+            output_str = "".join(
+                str(c.content) if hasattr(c, "content") else str(c) for c in chunks
+            )
+            _ai_app_sec_035_log_llm_interaction(
+                operation="stream",
+                model=self._model_name,
+                request_id=request_id,
+                duration_s=duration,
+                input_len=len(input_str),
+                output_len=len(output_str),
+                status="success",
+            )
+        except Exception as exc:
+            duration = time.time() - t0
+            _ai_app_sec_035_log_llm_interaction(
+                operation="stream",
+                model=self._model_name,
+                request_id=request_id,
+                duration_s=duration,
+                input_len=len(input_str),
+                output_len=sum(len(str(c.content) if hasattr(c, "content") else str(c)) for c in chunks),
+                status=f"error:{type(exc).__name__}",
+            )
+            raise
+
+# Model card / technical documentation references for each GPAI provider.
+# TODO: Replace any placeholder URLs with the exact model card URL before deployment.
+MODEL_CARD_URL_OPENAI = "https://openai.com/research/"  # OpenAI model cards and research
+MODEL_CARD_URL_AZURE_OPENAI = "https://openai.com/research/"  # Azure-hosted OpenAI models
+MODEL_CARD_URL_ANTHROPIC = "https://www.anthropic.com/research"  # Anthropic model cards
+MODEL_CARD_URL_GEMINI = "https://ai.google.dev/gemini-api/docs"  # Google Gemini technical docs
+MODEL_CARD_URL_MISTRAL = "https://docs.mistral.ai/"  # Mistral AI technical documentation
+
+import re as _re
+
+# Organisation disapproved model registry (authoritative data service).
+# Models whose normalised identifiers match an entry here are blocked.
+_ai_app_sec_006_DISAPPROVED_MODELS: frozenset[str] = frozenset({
+    # DeepSeek variants
+    "deepseekchat",
+    "deepseekr1",
+    "deepseekr1distillllama70b",
+    "deepseekreasoner",
+    "customllmclientnull",
+    "usdeepseekr1v10null",
+    "openrouternull",
+})
+
+
+def _ai_app_sec_006_normalize(model: str) -> str:
+    """Normalise a model identifier for registry comparison.
+
+    Strips case and removes spaces, hyphens, underscores, dots and colons so
+    that e.g. "us.deepseek.r1-v1:0" matches "usdeepseekr1v10".
+    """
+    return _re.sub(r"[\s\-_\.:\u0000]+", "", model).lower()
+
+
+def _assert_model_approved(model: str) -> None:
+    """Raise ValueError if *model* is in the organisation's disapproved registry."""
+    normalised = _ai_app_sec_006_normalize(model)
+    if any(
+        normalised == blocked or normalised.startswith(blocked)
+        for blocked in _ai_app_sec_006_DISAPPROVED_MODELS
+    ):
+        raise ValueError(
+            f"Model '{model}' is in the organisation's disapproved model registry "
+            "and may not be instantiated."
+        )
+
 
 class LLMTokenizer:
     _cache: dict[
@@ -223,7 +388,10 @@ class LLMEndpoint:
             ChatGroq,
         ]
         try:
+            _assert_model_approved(config.model)
+
             if config.supplier == DefaultModelSuppliers.AZURE:
+                # Model card / technical docs: MODEL_CARD_URL_AZURE_OPENAI
                 # Parse the URL
                 parsed_url = urlparse(config.llm_base_url)
                 deployment = parsed_url.path.split("/")[3]  # type: ignore
@@ -240,6 +408,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.ANTHROPIC:
+                # Model card / technical docs: MODEL_CARD_URL_ANTHROPIC
                 assert config.llm_api_key, "Can't load model config"
                 _llm = ChatAnthropic(
                     model_name=config.model,
@@ -251,6 +420,7 @@ class LLMEndpoint:
                     stop=None,
                 )
             elif config.supplier == DefaultModelSuppliers.OPENAI:
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -263,6 +433,7 @@ class LLMEndpoint:
                     else None,
                 )
             elif config.supplier == DefaultModelSuppliers.MISTRAL:
+                # Model card / technical docs: MODEL_CARD_URL_MISTRAL
                 _llm = ChatMistralAI(
                     model_name=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -272,6 +443,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.GEMINI:
+                # Model card / technical docs: MODEL_CARD_URL_GEMINI
                 _llm = ChatGoogleGenerativeAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -293,6 +465,8 @@ class LLMEndpoint:
                 )
 
             else:
+                # Fallback to OpenAI-compatible endpoint.
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -302,7 +476,8 @@ class LLMEndpoint:
                     max_completion_tokens=config.max_output_tokens,
                     temperature=config.temperature,
                 )
-            instance = cls(llm=_llm, llm_config=config)
+            _logging_llm = _ai_app_sec_035_LoggingLLM(_llm, config.model)
+            instance = cls(llm=_logging_llm, llm_config=config)
             cls._cache[hashed_config] = instance
 
             return instance
