@@ -307,20 +307,23 @@ def _load_guardrail_manifest_url() -> str:
 
 
 def _resolve_gr_origin(explicit: str | None = None) -> str:
-    """Resolve the GR origin, preserving configured local loopback servers.
+    """POST /enforce to the hosted GR origin for the active environment.
 
-    Prefers an explicit origin, then ``GR_SERVICE_URL`` (including local),
-    then the legacy ``.lineaje/guardrail.json`` URL. Missing or
-    unusable values fall back to the hosted origin for the active env.
+    Prefers an explicit non-loopback origin (unit tests), then the
+    ``.lineaje/guardrail.json`` manifest's ``gr_service_url`` (written by the
+    MCP scan for this environment), then ``GR_SERVICE_URL``. Loopback,
+    missing, or unusable values fall back to the hardcoded hosted origin for
+    the active env — a local ``GR_SERVICE_URL=http://127.0.0.1:8000`` must
+    not become the enforce origin (connection-refused fail-open).
     """
     try:
         _ensure_runtime_env_loaded()
         for candidate in (
             _origin_for_enforce_api(explicit or ""),
-            _origin_for_enforce_api(os.environ.get("GR_SERVICE_URL", "")),
             _load_guardrail_manifest_url(),
+            _origin_for_enforce_api(os.environ.get("GR_SERVICE_URL", "")),
         ):
-            if candidate:
+            if candidate and not _is_loopback_origin(candidate):
                 return candidate
         return _hardcoded_gr_origin()
     except Exception:
@@ -582,11 +585,6 @@ def _ensure_ca_bundle_trusted() -> None:
     if _CA_BUNDLE_TRUSTED:
         return
     _CA_BUNDLE_TRUSTED = True
-    # Hybrid deployments only (GR on the customer's own VM behind a
-    # self-signed CA). SaaS / unset: the GR endpoint has a publicly trusted
-    # certificate, so never swap in a local CA bundle.
-    if (os.environ.get("UNIFAI_MODE") or "").strip().lower() not in ("hybrid", "onprem"):
-        return
     for path in _ca_bundle_candidates():
         if not os.path.isfile(path):
             continue
@@ -601,10 +599,11 @@ def _ensure_runtime_env_loaded() -> None:
     if _RUNTIME_ENV_LOADED:
         return
     _RUNTIME_ENV_LOADED = True
+    _ensure_ca_bundle_trusted()
     _keys = frozenset({
         "GR_SERVICE_URL", "LINEAJE_PAT_TOKEN", "LINEAJE_PAT", "GR_BEARER_TOKEN",
         "LINEAJE_REFRESH_TOKEN", "MCP_REFRESH_TOKEN", "LINEAJE_RENEW_ACCESS_TOKEN_URL",
-        "MCP_BEARER_TOKEN", "LINEAJE_BEARER_TOKEN", "BEARER_TOKEN", "UNIFAI_MODE",
+        "MCP_BEARER_TOKEN", "LINEAJE_BEARER_TOKEN", "BEARER_TOKEN",
     })
     _candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -626,8 +625,6 @@ def _ensure_runtime_env_loaded() -> None:
         except OSError:
             pass
         break
-    # After .env is read, so a UNIFAI_MODE=hybrid set there is honoured.
-    _ensure_ca_bundle_trusted()
 
 
 def call_gr_enforce(
@@ -808,11 +805,6 @@ class SiteDescriptor:
     fail_mode: str = "ALLOW_WITH_AUDIT"
     source_type: str = ""
     destination_type: str = ""
-    # Scan-time project (the SBOM document_name the scan uploaded under) and
-    # organization — sent on every /enforce so project/org-scoped policy
-    # lookups (e.g. the approved-LLM list) filter on them.
-    project: str = ""
-    organization: str = ""
 
     def __post_init__(self) -> None:
         # Bind the per-request latch on the constructing thread (the FastAPI
@@ -1770,12 +1762,6 @@ def _ensure_site_registered(
                 "phase": getattr(site, "phase", "") or "",
                 "boundary": getattr(site, "boundary", None) or {},
                 "components": getattr(site, "components", None) or {},
-                # Record the stub's own list as the site's mapping so the
-                # /enforce exact-match holds.
-                "candidate_policies": [
-                    (c.get("policy_id") if isinstance(c, dict) else getattr(c, "policy_id", c))
-                    for c in (getattr(site, "candidate_policies", None) or [])
-                ],
             },
             pat,
             timeout,
@@ -1924,8 +1910,6 @@ def check(
         "candidate_policies": site.candidate_policies,
         "boundary": site.boundary,
         "components": site.components,
-        "project": getattr(site, "project", "") or "",
-        "organization": getattr(site, "organization", "") or "",
         "source_type": wire_src,
         "destination_type": wire_dst,
         "payload": {"mode": "inline", "content_type": content_type, "data": wire_data},
