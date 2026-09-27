@@ -18,6 +18,8 @@ retrieval_config:
     supplier: "cohere"
 
     # The model to use for the reranker for the given supplier
+    # MODEL_CARD_URL: https://docs.cohere.com/docs/rerank-2 (see also https://cohere.com/blog/rerank)
+    # TODO: Verify this URL points to the current model card before deployment.
     model: "rerank-multilingual-v3.0"
 
     # Number of chunks returned by the reranker
@@ -27,7 +29,7 @@ retrieval_config:
     supplier: "openai"
 
     # The model to use for the LLM for the given supplier
-    model: "gpt-3.5-turbo-0125"
+    model: "gpt-4o"
 
     max_context_tokens: 2000
 
