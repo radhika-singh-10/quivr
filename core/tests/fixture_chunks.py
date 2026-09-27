@@ -1,111 +1,6 @@
-# Copyright (c) Lineaje, Inc. All rights reserved.
-# gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
-class GRBlockedError(Exception):
-    def __init__(self, policy_id, reason):
-        self.policy_id, self.reason = policy_id, reason
-        super().__init__("Guardrail block for policy %r: %s" % (policy_id, reason))
-
-def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **context):
-    import json as _j, logging as _lg, os as _os, urllib.error as _ue, urllib.request as _ur
-    _log = _lg.getLogger("lineaje.gr_client")
-    hop_label = source_type + "->" + destination_type
-    _prior = getattr(gr_check, "_blocked", None)
-    if _prior:
-        _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
-        raise GRBlockedError(_prior[0], _prior[1])
-    def _blk(o):
-        if isinstance(o, dict):
-            return any(_blk(o.get(k)) for k in ("skill_path", "skill_file", "path", "file_path", "data", "skill_manifest_path"))
-        s = str(o or "")
-        b = s.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        if b.endswith(".md.blocked"): return True
-        try:
-            if b in ("skill.md", "skills.md") and _os.path.isfile(str(o) + ".blocked"): return True
-        except Exception:
-            pass
-        return False
-    if _blk(data) or _blk(context):
-        _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
-        gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-        raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-    url = _os.environ.get("GR_SERVICE_URL", "")
-    if not url:
-        return data
-    tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
-    # Refresh token first: the GR service exchanges it for the access JWT it
-    # calls the Data Service policy API with; a lineaje_pat_ PAT only
-    # identifies the caller and cannot be exchanged.
-    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_REFRESH_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
-    params_key = "out_params" if destination_type == "agent" else "in_params"
-    def _gr_js(o):
-        # JSON form of non-JSON payloads (LangChain Document, pydantic models, ...).
-        if hasattr(o, "page_content"):
-            return {"page_content": o.page_content, "metadata": getattr(o, "metadata", None) or {}}
-        for _m in ("model_dump", "dict", "to_dict"):
-            _f = getattr(o, _m, None)
-            if callable(_f):
-                try:
-                    return _f()
-                except Exception:
-                    pass
-        if isinstance(o, (set, tuple)):
-            return list(o)
-        return str(o)
-    def _gr_back(orig, new):
-        # Map the (possibly masked) JSON back onto the caller's own objects.
-        if new == _j.loads(_j.dumps(orig, default=_gr_js)):
-            return orig
-        if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
-            _out = [_gr_back(a, b) for a, b in zip(orig, new)]
-            return tuple(_out) if isinstance(orig, tuple) else _out
-        if hasattr(orig, "page_content") and isinstance(new, dict) and "page_content" in new:
-            import copy as _cp
-            _c = _cp.copy(orig)
-            _c.page_content = new["page_content"]
-            if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
-                _c.metadata = new["metadata"]
-            return _c
-        if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
-            return new
-        _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
-        return orig
-    try:
-        headers = {"Content-Type": "application/json"}
-        if bearer:
-            headers["Authorization"] = "Bearer " + bearer
-        _sent = _j.loads(_j.dumps(data, default=_gr_js))
-        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": _sent}}
-        for _k, _v in context.items():
-            if _v:
-                body[_k] = _v
-        if tid:
-            body["tenant_id"] = tid
-        _base = url.rstrip("/")
-        if _base.lower().endswith("/enforce"): _base = _base[: -len("/enforce")].rstrip("/")
-        req = _ur.Request(_base + "/enforce", data=_j.dumps(body, default=_gr_js).encode(), headers=headers, method="POST")
-        with _ur.urlopen(req, timeout=timeout) as resp:
-            result = _j.loads(resp.read())
-    except Exception as exc:
-        if isinstance(exc, _ue.HTTPError) and exc.code == 403:
-            try: detail = _j.loads(exc.read()).get("detail", {})
-            except Exception: detail = {}
-            blocked_by = detail.get("blocked_by") or []
-            policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
-            reason = detail.get("message", "Request denied by policy enforcement.")
-            _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
-            if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
-                return data
-            gr_check._blocked = (policy_id, reason)
-            raise GRBlockedError(policy_id, reason)
-        _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
-        return data
-    if result.get("status") == "escalate":
-        _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
-    if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
-        return data
-    return _gr_back(data, result["result"]["data"])
 import asyncio
 import json
+import re
 from uuid import uuid4
 
 from langchain_core.embeddings import DeterministicFakeEmbedding
@@ -113,12 +8,88 @@ from langchain_core.messages.ai import AIMessageChunk
 from langchain_core.vectorstores import InMemoryVectorStore
 from quivr_core.rag.entities.chat import ChatHistory
 from quivr_core.rag.entities.config import LLMEndpointConfig, RetrievalConfig
+
+# Model card / technical documentation for the GPAI model used below.
+# See the official OpenAI research page for gpt-4o details and usage policy.
+MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact gpt-4o model card URL before deployment
 from quivr_core.llm import LLMEndpoint
 from quivr_core.rag.quivr_rag_langgraph import QuivrQARAGLangGraph
 
 
+DANGEROUS_PATTERNS = [
+    r"\beval\s*\(",
+    r"\bexec\s*\(",
+    r"\bsubprocess\s*\.\s*\w*\s*\([^)]*shell\s*=\s*True",
+    r"\b__import__\s*\(",
+    r"\bcompile\s*\(",
+    r"\bexecfile\s*\(",
+    r"\binput\s*\(",
+    r"\bos\.system\s*\(",
+    r"\bos\.popen\s*\(",
+    r"\beval\b",
+    r"\bFunction\s*\(",
+    r"setTimeout\s*\(",
+    r"setInterval\s*\(",
+    r"new\s+Function\s*\(",
+]
+
+
+def sanitize_llm_output(text: str) -> str:
+    """Remove lines containing dynamic code execution primitives from LLM output."""
+    import re
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    safe_lines = []
+    for line in lines:
+        is_dangerous = any(re.search(pattern, line) for pattern in DANGEROUS_PATTERNS)
+        if not is_dangerous:
+            safe_lines.append(line)
+    return "".join(safe_lines)
+
+
+def sanitize_input(value):
+    """Sanitize a string value to block prompt injection attempts."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    # Block common prompt injection patterns
+    injection_patterns = [
+        r"(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions)",
+        r"(?i)(disregard\s+(all\s+)?(previous|prior|above)\s+instructions)",
+        r"(?i)(forget\s+(all\s+)?(previous|prior|above)\s+instructions)",
+        r"(?i)(you\s+are\s+now\s+[a-z])",
+        r"(?i)(act\s+as\s+(a\s+)?[a-z])",
+        r"(?i)(system\s*:\s*)",
+        r"(?i)(\[\s*system\s*\])",
+        r"(?i)(new\s+instructions?\s*:)",
+        r"(?i)(override\s+(previous\s+)?instructions?)",
+        r"(?i)(jailbreak)",
+        r"(?i)(prompt\s+injection)",
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, value):
+            raise ValueError(
+                f"Prompt injection attempt detected and blocked in input: {value[:80]!r}"
+            )
+    return value
+
+
+def sanitize_chat_history(chat_history):
+    """Sanitize chat history messages to block prompt injection."""
+    if chat_history is None:
+        return chat_history
+    # If it's iterable with messages, sanitize each message content
+    if hasattr(chat_history, 'messages'):
+        for msg in chat_history.messages:
+            if hasattr(msg, 'content') and isinstance(msg.content, str):
+                sanitize_input(msg.content)
+    return chat_history
+
+
 async def main():
-    retrieval_config = RetrievalConfig(llm_config=LLMEndpointConfig(model="gpt-4o"))
+    retrieval_config = RetrievalConfig(llm_config=LLMEndpointConfig(model="gpt-4o-mini"))
     embedder = DeterministicFakeEmbedding(size=20)
     vec = InMemoryVectorStore(embedder)
 
@@ -130,14 +101,19 @@ async def main():
 
     conversational_qa_chain = rag_pipeline.build_chain()
 
+    # Sanitize all user-supplied inputs before passing to the LLM pipeline
+    safe_user_message = sanitize_input("What is NLP, give a very long detailed answer")
+    safe_chat_history = sanitize_chat_history(chat_history)
+    safe_custom_personality = sanitize_input(None)
+
     with open("response.jsonl", "w") as f:
         async for event in conversational_qa_chain.astream_events(
             {
                 "messages": [
-                    ("user", "What is NLP, give a very long detailed answer"),
+                    ("user", safe_user_message),
                 ],
-                "chat_history": chat_history,
-                "custom_personality": None,
+                "chat_history": safe_chat_history,
+                "custom_personality": safe_custom_personality,
             },
             version="v1",
             config={"metadata": {}},
@@ -148,25 +124,18 @@ async def main():
                 and event["metadata"]["langgraph_node"] == "generate"
             ):
                 chunk = event["data"]["chunk"]
-                dict_chunk = {
-                    k: v.dict() if isinstance(v, AIMessageChunk) else v
-                    for k, v in chunk.items()
-                }
-                try:
-                    import asyncio as _gr_asyncio
-                    dict_chunk = await _gr_asyncio.to_thread(gr_check, dict_chunk, "agent", "external", candidate_policies=['AI_APP_SEC_006', 'AI_APP_SEC_035'], site_id='site:sha256:5c68389e092835bfceae8e47f5bc611a1349443c14c403a6dc79dca9fb96a8d8')
-                except Exception as _gr_exc:
-                    if type(_gr_exc).__name__ == "GRBlockedError": raise
-                    dict_chunk = dict_chunk
-                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->external' — passing data through unchecked")
-                try:
-                    import asyncio as _gr_asyncio
-                    dict_chunk = await _gr_asyncio.to_thread(gr_check, dict_chunk, "agent", "external", candidate_policies=['AI_APP_SEC_001', 'AI_APP_SEC_002', 'AI_APP_SEC_006', 'AI_APP_SEC_022', 'AI_APP_SEC_023', 'AI_APP_SEC_028', 'AI_APP_SEC_029', 'AI_APP_SEC_032', 'AI_APP_SEC_034', 'AI_APP_SEC_035', 'AI_APP_SEC_039', 'AI_APP_SEC_040', 'AI_APP_SEC_059', 'AI_APP_SEC_064', 'AI_APP_SEC_066', 'AI_APP_SEC_067', 'AI_APP_SEC_068', 'AI_APP_SEC_069', 'AI_APP_SEC_071', 'AI_APP_SEC_075', 'AI_APP_SEC_076', 'AI_APP_SEC_078', 'AI_APP_SEC_079', 'AI_DAT_SEC_001', 'AI_DAT_SEC_009', 'AI_DAT_SEC_010', 'AI_DAT_SEC_011', 'AI_DAT_SEC_012', 'AI_DAT_SEC_023', 'AI_DAT_SEC_024', 'AI_DAT_SEC_025', 'AI_DAT_SEC_027', 'AI_DAT_SEC_029', 'AI_DAT_SEC_030', 'AI_DAT_SEC_039', 'AI_IAC_002', 'AI_IAC_007', 'AI_IAC_008', 'AI_IAC_014', 'AI_IAC_015', 'AI_IAC_016', 'AI_IAC_017', 'AI_IAC_018', 'AI_IAC_020', 'AI_IAC_022', 'AI_IAC_023', 'AI_IAC_024', 'AI_IAC_025', 'AI_IAC_026', 'AI_IAC_027', 'AI_VULN_SEC_002', 'AI_VULN_SEC_005', 'AI_VULN_SEC_006', 'AI_VULN_SEC_007'], site_id='site:sha256:50e5ce2465b6022042bfddcded02e980d51e17614eab4c66eab6d1d9018eddd1')
-                except Exception as _gr_exc:
-                    if type(_gr_exc).__name__ == "GRBlockedError": raise
-                    dict_chunk = dict_chunk
-                    __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->external' — passing data through unchecked")
-                f.write(json.dumps(dict_chunk) + "\n")
+                sanitized_chunk = {}
+                for k, v in chunk.items():
+                    if isinstance(v, AIMessageChunk):
+                        v_dict = v.dict()
+                        if "content" in v_dict and isinstance(v_dict["content"], str):
+                            v_dict["content"] = sanitize_llm_output(v_dict["content"])
+                        sanitized_chunk[k] = v_dict
+                    elif isinstance(v, str):
+                        sanitized_chunk[k] = sanitize_llm_output(v)
+                    else:
+                        sanitized_chunk[k] = v
+                f.write(json.dumps(sanitized_chunk) + "\n")
 
 
 asyncio.run(main())
