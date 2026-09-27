@@ -91,6 +91,22 @@ def ask(brain: Brain, question: str) -> str:
     retrieval_config = RetrievalConfig(
         llm_config=brain.llm.get_config(), prompt=ANSWER_INSTRUCTIONS
     )
+    # LINEAJE: enforce() `question` at agent->system security_decision — scan flagged AI_APP_SEC_035 (Agents must log all interactions with an LLM); AI_APP_SEC_070 (Detect and block all forms of prompt injection attacks in user inputs and file contents). Mask/block; do not remove without review. site_id='site:sha256:e71d7c5b1e61ca92218a7fd0a5279408a5400ffae4b6503df9169530e130574e'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:e71d7c5b1e61ca92218a7fd0a5279408a5400ffae4b6503df9169530e130574e', phase='security_decision', boundary={'source': 'agent_message', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='system')
+    try:
+        question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=94)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    # LINEAJE: enforce() `question` at agent->llm pre_model — scan flagged AI_APP_SEC_035 (Agents must log all interactions with an LLM); AI_APP_SEC_070 (Detect and block all forms of prompt injection attacks in user inputs and file contents). Mask/block; do not remove without review. site_id='site:sha256:557e25a2b929496f09d126803bfa91364c2ed42ca7a47c21ba38b7d6fdabdf76'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:557e25a2b929496f09d126803bfa91364c2ed42ca7a47c21ba38b7d6fdabdf76', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_070', 'guardrail_id': 'Sanitize Prompt Injection', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_011', 'guardrail_id': 'Redact PII', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+    try:
+        question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=94)
+    except _gr_client.GuardrailUnavailableError:
+        pass
+    except PermissionError:
+        raise
     return brain.ask(uuid4(), question, retrieval_config=retrieval_config).answer
 
 
@@ -101,9 +117,16 @@ def main(file_paths: list[str], question: str | None) -> None:
         llm=build_llm(),
         embedder=OllamaEmbeddings(model=EMBED_MODEL, base_url=OLLAMA_URL),
     )
+    # LINEAJE: enforce() `brain` at llm->agent post_model — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:360614954a2e6aa3b0e55f422c42328f5499b74e14145531f7b5444ae5c9ff59'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:360614954a2e6aa3b0e55f422c42328f5499b74e14145531f7b5444ae5c9ff59', phase='post_model', boundary={'source': 'model', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='llm', destination_type='agent')
+    try:
+        brain = _gr_client.enforce(_gr_site, brain, content_type='application/json', variable_name='brain', source_file=__file__, before_line=98)
+    except _gr_client.GuardrailUnavailableError:
+        pass
 
     if question:
-        _lineaje_payload = "answer:"
+        _lineaje_payload = """answer:"""
         # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_035 (Agents must log all interactions with an LLM). Mask/block; do not remove without review. site_id='site:sha256:ed642daf904078384b53c6731b231babfd56676b193047c636916d249c69e395'
         _gr_client = _lineaje_load_gr_client()
         _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ed642daf904078384b53c6731b231babfd56676b193047c636916d249c69e395', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'policy_name': "Use only LLMs from the organization's approved list.", 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_035', 'policy_name': 'Agents must log all interactions with an LLM', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='log')
@@ -178,6 +201,13 @@ if __name__ == "__main__":
     question = " ".join(args.question) or None
 
     if args.file:
+        # LINEAJE: enforce() `question` at agent->system security_decision — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:b9af2e974b6dbfddfb94cf2ba6d12b3312b0f121968a636a20a859ec093ca2e4'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b9af2e974b6dbfddfb94cf2ba6d12b3312b0f121968a636a20a859ec093ca2e4', phase='security_decision', boundary={'source': 'agent_message', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='system')
+        try:
+            question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=204)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         main(args.file, question)
     else:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as demo_file:
