@@ -1,4 +1,18 @@
 # Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
+# Copyright (c) Lineaje, Inc. All rights reserved.
 # gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
 class GRBlockedError(Exception):
     def __init__(self, policy_id, reason):
@@ -11,6 +25,15 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     hop_label = source_type + "->" + destination_type
     _prior = getattr(gr_check, "_blocked", None)
     if _prior:
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:3198d3bcb225f67ea8dc5c07a0e8507e15fa4f0ca02c26b86f9d81f23e531e1b'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3198d3bcb225f67ea8dc5c07a0e8507e15fa4f0ca02c26b86f9d81f23e531e1b', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
         raise GRBlockedError(_prior[0], _prior[1])
     def _blk(o):
@@ -25,11 +48,29 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             pass
         return False
     if _blk(data) or _blk(context):
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:3967e2d2d47d9e2bae0a1e60702bb70b1b48c88878f558998dcaf886cd1dc744'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3967e2d2d47d9e2bae0a1e60702bb70b1b48c88878f558998dcaf886cd1dc744', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
         gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
         raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
     url = _os.environ.get("GR_SERVICE_URL", "")
     if not url:
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:2da0592470552c734c6f5bac57688b71b69a36bff013ba49dcbbe0400495e864'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:2da0592470552c734c6f5bac57688b71b69a36bff013ba49dcbbe0400495e864', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
     # Refresh token first: the GR service exchanges it for the access JWT it
@@ -54,6 +95,15 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     def _gr_back(orig, new):
         # Map the (possibly masked) JSON back onto the caller's own objects.
         if new == _j.loads(_j.dumps(orig, default=_gr_js)):
+            # LINEAJE: enforce() `orig` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:9f9488de23bf94b141e30324a33cc522fb76f1f613ff6d0f2ab170aa5efdc523'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9f9488de23bf94b141e30324a33cc522fb76f1f613ff6d0f2ab170aa5efdc523', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                orig = _gr_client.enforce(_gr_site, orig, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return orig
         if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
             _out = [_gr_back(a, b) for a, b in zip(orig, new)]
@@ -64,10 +114,37 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             _c.page_content = new["page_content"]
             if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
                 _c.metadata = new["metadata"]
+            # LINEAJE: enforce() `_c` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:60ed635999d8c39bf450826853740794bff043f036350753b6570ece1bc729e1'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:60ed635999d8c39bf450826853740794bff043f036350753b6570ece1bc729e1', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                _c = _gr_client.enforce(_gr_site, _c, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return _c
         if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
+            # LINEAJE: enforce() `new` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:d9036388de82bb830ebe31a8709857896d5a0d906d3ce4aea6bf829561f9af79'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:d9036388de82bb830ebe31a8709857896d5a0d906d3ce4aea6bf829561f9af79', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                new = _gr_client.enforce(_gr_site, new, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return new
         _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
+        # LINEAJE: enforce() `orig` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:c8ff9f356cc56edd8e70db62897b37e18fe7304db7495de78dec2723caef8598'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c8ff9f356cc56edd8e70db62897b37e18fe7304db7495de78dec2723caef8598', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            orig = _gr_client.enforce(_gr_site, orig, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return orig
     try:
         headers = {"Content-Type": "application/json"}
@@ -92,16 +169,70 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             blocked_by = detail.get("blocked_by") or []
             policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
             reason = detail.get("message", "Request denied by policy enforcement.")
+            # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:43fb99bc936e1f7d408a06074f2a99d9aaed95572f5fd187fe7c52b75271a4f1'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:43fb99bc936e1f7d408a06074f2a99d9aaed95572f5fd187fe7c52b75271a4f1', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+            try:
+                hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
             if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
+                # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:0d54331039b8d3d4102622b5dff52360b4a210b4ec6e3363fb8db428710ce5a0'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0d54331039b8d3d4102622b5dff52360b4a210b4ec6e3363fb8db428710ce5a0', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+                try:
+                    data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+                except _gr_client.GuardrailUnavailableError:
+                    pass
+                except PermissionError:
+                    pass
                 return data
             gr_check._blocked = (policy_id, reason)
             raise GRBlockedError(policy_id, reason)
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:82ff24183001f14a95b219a4594d094db9a701ccbf318bf000ce3a735073fb5c'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:82ff24183001f14a95b219a4594d094db9a701ccbf318bf000ce3a735073fb5c', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:86a56397d86bfe00a1d9e17688d5a2f10abd1f34daeb02d3dfac34c278782a85'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:86a56397d86bfe00a1d9e17688d5a2f10abd1f34daeb02d3dfac34c278782a85', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     if result.get("status") == "escalate":
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:4184c18c66ab0241423550d0e2c21edc6e7d7d6de1a88683bbfbc220f59004ed'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4184c18c66ab0241423550d0e2c21edc6e7d7d6de1a88683bbfbc220f59004ed', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
     if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:0043042e042c71b051b48cffcc4436a7a92ba56bf4677bac21f4513dac2cc1dc'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0043042e042c71b051b48cffcc4436a7a92ba56bf4677bac21f4513dac2cc1dc', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     return _gr_back(data, result["result"]["data"])
 import logging
@@ -209,41 +340,8 @@ class LLMModelConfig:
                 max_output_tokens=32768,
                 tokenizer_hub="Quivr/gpt-4o",
             ),
-            "gpt-4o": LLMConfig(
-                max_context_tokens=128000,
-                max_output_tokens=16384,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "gpt-4o-mini": LLMConfig(
-                max_context_tokens=128000,
-                max_output_tokens=16384,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "o3-mini": LLMConfig(
-                max_context_tokens=200000,
-                max_output_tokens=100000,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "o4-mini": LLMConfig(
-                max_context_tokens=200000,
-                max_output_tokens=100000,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "o1-mini": LLMConfig(
-                max_context_tokens=128000,
-                max_output_tokens=65536,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "o1-preview": LLMConfig(
-                max_context_tokens=128000,
-                max_output_tokens=32768,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
-            "o1": LLMConfig(
-                max_context_tokens=200000,
-                max_output_tokens=100000,
-                tokenizer_hub="Quivr/gpt-4o",
-            ),
+# NOTE: Only registry-approved models are listed below.
+            # gpt-4o, gpt-4o-mini, o3-mini, o4-mini, o1-mini, o1-preview, o1 removed — not in approved registry.
             "gpt-4-turbo": LLMConfig(
                 max_context_tokens=128000,
                 max_output_tokens=4096,
@@ -507,8 +605,18 @@ class LLMEndpointConfig(QuivrBaseConfig):
                 if type(_gr_exc).__name__ == "GRBlockedError": raise
                 _lineaje_payload_490 = _lineaje_payload_490
                 __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
+            _lineaje_payload_510 = f"Please set the environment variable: '{self.env_variable_name}'. "
+            # LINEAJE: enforce() `_lineaje_payload_510` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:b0b311b977939d9bf05a2c8dd1dfad54df394597651a56f6a3857154dfea90e3'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b0b311b977939d9bf05a2c8dd1dfad54df394597651a56f6a3857154dfea90e3', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+            try:
+                _lineaje_payload_510 = _gr_client.enforce(_gr_site, _lineaje_payload_510, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             logger.warning(
-                f"Please set the environment variable: '{self.env_variable_name}'. "
+                _lineaje_payload_510
             )
 
     def set_llm_model_config(self):
@@ -539,8 +647,18 @@ class LLMEndpointConfig(QuivrBaseConfig):
                         if type(_gr_exc).__name__ == "GRBlockedError": raise
                         _lineaje_payload_515 = _lineaje_payload_515
                         __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
+                    _lineaje_payload_542 = f"Lowering max_context_tokens from {self.max_context_tokens} to {_max_context_tokens}"
+                    # LINEAJE: enforce() `_lineaje_payload_542` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:a4a0fcbca85d4d9f0b537ce4fc6e9fd6d3fa51dc25e487cd808d748ab0578c59'
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a4a0fcbca85d4d9f0b537ce4fc6e9fd6d3fa51dc25e487cd808d748ab0578c59', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    try:
+                        _lineaje_payload_542 = _gr_client.enforce(_gr_site, _lineaje_payload_542, content_type='application/json')
+                    except _gr_client.GuardrailUnavailableError:
+                        pass
+                    except PermissionError:
+                        pass
                     logger.warning(
-                        f"Lowering max_context_tokens from {self.max_context_tokens} to {_max_context_tokens}"
+                        _lineaje_payload_542
                     )
                     self.max_context_tokens = _max_context_tokens
 
@@ -581,8 +699,18 @@ class LLMEndpointConfig(QuivrBaseConfig):
                         if type(_gr_exc).__name__ == "GRBlockedError": raise
                         _lineaje_payload_543 = _lineaje_payload_543
                         __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
+                    _lineaje_payload_584 = f"Lowering max_output_tokens from {self.max_output_tokens} to {llm_model_config.max_output_tokens}"
+                    # LINEAJE: enforce() `_lineaje_payload_584` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:969b6d73f3bd2a72e9915175426e9b3251e75891520612fc16a5d49e0dd8f147'
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:969b6d73f3bd2a72e9915175426e9b3251e75891520612fc16a5d49e0dd8f147', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    try:
+                        _lineaje_payload_584 = _gr_client.enforce(_gr_site, _lineaje_payload_584, content_type='application/json')
+                    except _gr_client.GuardrailUnavailableError:
+                        pass
+                    except PermissionError:
+                        pass
                     logger.warning(
-                        f"Lowering max_output_tokens from {self.max_output_tokens} to {llm_model_config.max_output_tokens}"
+                        _lineaje_payload_584
                     )
                     self.max_output_tokens = llm_model_config.max_output_tokens
 
@@ -601,8 +729,18 @@ class LLMEndpointConfig(QuivrBaseConfig):
                         if type(_gr_exc).__name__ == "GRBlockedError": raise
                         _lineaje_payload_556 = _lineaje_payload_556
                         __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
+                    _lineaje_payload_604 = f"max_output_tokens is too low: {self.max_output_tokens}. "
+                    # LINEAJE: enforce() `_lineaje_payload_604` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:b92204dc77baca86b5eb2b9f73d1142ea5fbf10f7b794828e405b333da818ab5'
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b92204dc77baca86b5eb2b9f73d1142ea5fbf10f7b794828e405b333da818ab5', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    try:
+                        _lineaje_payload_604 = _gr_client.enforce(_gr_site, _lineaje_payload_604, content_type='application/json')
+                    except _gr_client.GuardrailUnavailableError:
+                        pass
+                    except PermissionError:
+                        pass
                     logger.error(
-                        f"max_output_tokens is too low: {self.max_output_tokens}. "
+                        _lineaje_payload_604
                     )
                     raise ValueError(
                         f"max_output_tokens is too low: {self.max_output_tokens}. "
