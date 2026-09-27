@@ -1,4 +1,18 @@
 # Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
+# Copyright (c) Lineaje, Inc. All rights reserved.
 # gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
 class GRBlockedError(Exception):
     def __init__(self, policy_id, reason):
@@ -11,6 +25,15 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     hop_label = source_type + "->" + destination_type
     _prior = getattr(gr_check, "_blocked", None)
     if _prior:
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:02e26ac6c2feea1fe8258134657cb30467c41b5e698bb1b6e9e60b6ffbb5851d'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:02e26ac6c2feea1fe8258134657cb30467c41b5e698bb1b6e9e60b6ffbb5851d', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
         raise GRBlockedError(_prior[0], _prior[1])
     def _blk(o):
@@ -25,11 +48,29 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             pass
         return False
     if _blk(data) or _blk(context):
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:20504964d9d5ec4e526334c3049c3042c8a2393d4106e4af0946a7ae526bb73e'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:20504964d9d5ec4e526334c3049c3042c8a2393d4106e4af0946a7ae526bb73e', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
         gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
         raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
     url = _os.environ.get("GR_SERVICE_URL", "")
     if not url:
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:9c4f35f83e2ca081f2dc2510407e7b6c5c6138143974be27026d8894696267c5'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9c4f35f83e2ca081f2dc2510407e7b6c5c6138143974be27026d8894696267c5', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
     # Refresh token first: the GR service exchanges it for the access JWT it
@@ -54,6 +95,15 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
     def _gr_back(orig, new):
         # Map the (possibly masked) JSON back onto the caller's own objects.
         if new == _j.loads(_j.dumps(orig, default=_gr_js)):
+            # LINEAJE: enforce() `orig` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:01bc78a2aec705cd1b365672b66a5513be28ad5e494bf7329a87ca695ffc52d0'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:01bc78a2aec705cd1b365672b66a5513be28ad5e494bf7329a87ca695ffc52d0', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                orig = _gr_client.enforce(_gr_site, orig, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return orig
         if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
             _out = [_gr_back(a, b) for a, b in zip(orig, new)]
@@ -64,10 +114,37 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             _c.page_content = new["page_content"]
             if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
                 _c.metadata = new["metadata"]
+            # LINEAJE: enforce() `_c` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:399eab866225fdd4a1b019c329d887f3b83fc70763bda029f999fc6b383ec9e6'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:399eab866225fdd4a1b019c329d887f3b83fc70763bda029f999fc6b383ec9e6', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                _c = _gr_client.enforce(_gr_site, _c, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return _c
         if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
+            # LINEAJE: enforce() `new` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:0f18133df283b627b1e318fef9da150517c6c4cfe2ce389b95c4bec35c06ee7d'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0f18133df283b627b1e318fef9da150517c6c4cfe2ce389b95c4bec35c06ee7d', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            try:
+                new = _gr_client.enforce(_gr_site, new, content_type='text/plain')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             return new
         _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
+        # LINEAJE: enforce() `orig` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:c18fc9aec6b0e3a70dfba12f5d8a0df7f9dc9dd1ece60e27c49755a70027ba9b'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c18fc9aec6b0e3a70dfba12f5d8a0df7f9dc9dd1ece60e27c49755a70027ba9b', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            orig = _gr_client.enforce(_gr_site, orig, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return orig
     try:
         headers = {"Content-Type": "application/json"}
@@ -92,16 +169,70 @@ def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **c
             blocked_by = detail.get("blocked_by") or []
             policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
             reason = detail.get("message", "Request denied by policy enforcement.")
+            # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:aa99daee951b2daf126fb6eb3982e4a8cd7dafa24b0c5c8565a5d1c3c8a048a4'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:aa99daee951b2daf126fb6eb3982e4a8cd7dafa24b0c5c8565a5d1c3c8a048a4', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+            try:
+                hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+            except _gr_client.GuardrailUnavailableError:
+                pass
+            except PermissionError:
+                pass
             _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
             if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
+                # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:3fc6109e5cdcf25a323a58da858950e3b234be67bda5bc62abd681c9f4493769'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3fc6109e5cdcf25a323a58da858950e3b234be67bda5bc62abd681c9f4493769', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+                try:
+                    data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+                except _gr_client.GuardrailUnavailableError:
+                    pass
+                except PermissionError:
+                    pass
                 return data
             gr_check._blocked = (policy_id, reason)
             raise GRBlockedError(policy_id, reason)
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:2c62da26ea40cb2261dd6eb7b367576c99eb2f2f9fa10654eed75e79f13214c6'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:2c62da26ea40cb2261dd6eb7b367576c99eb2f2f9fa10654eed75e79f13214c6', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:3a39ae3f877553fab0473c49fe5bce871c04c0be939495b240f9fc3fe80659d6'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:3a39ae3f877553fab0473c49fe5bce871c04c0be939495b240f9fc3fe80659d6', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     if result.get("status") == "escalate":
+        # LINEAJE: enforce() `hop_label` at agent->log log_emit — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:1829ad77a9e9302a793977e6a37abbc5de437d3172786e7f8b94b1d9089e5e09'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:1829ad77a9e9302a793977e6a37abbc5de437d3172786e7f8b94b1d9089e5e09', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        try:
+            hop_label = _gr_client.enforce(_gr_site, hop_label, content_type='application/json')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
     if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
+        # LINEAJE: enforce() `data` at agent->user_interface data_egress — scan flagged AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:4574a67178136d011680e177c464832c981459f5d2e09bf13c0e3f092e821241'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4574a67178136d011680e177c464832c981459f5d2e09bf13c0e3f092e821241', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        try:
+            data = _gr_client.enforce(_gr_site, data, content_type='text/plain')
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            pass
         return data
     return _gr_back(data, result["result"]["data"])
 import hashlib
@@ -255,7 +386,78 @@ class QuivrFile:
             f = f
             __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'file_storage->agent' — passing data through unchecked")
         try:
-            yield f
+            import re as _re, tempfile as _tf, os as _os2
+            _pii_patterns = [
+                (r'\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b', '[REDACTED_SSN]'),
+                (r'\b(19|20)\d{2}\b', '[REDACTED_YEAR_OF_BIRTH]'),
+                (r'\b[A-Za-z]{2,}(?:,\s*[A-Za-z]{2,})+\b', None),
+                (r'\b(?:\+?1[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}\b', '[REDACTED_PHONE]'),
+                (r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', '[REDACTED_EMAIL]'),
+                (r'\b(?:passport\s*(?:no|number|#)?\s*:?\s*)?[A-Z]{1,2}\d{6,9}\b', '[REDACTED_PASSPORT]'),
+                (r"\b(?:driver'?s?\s*licen[sc]e\s*(?:no|number|#)?\s*:?\s*)[A-Z0-9\-]{5,20}\b", '[REDACTED_DL]'),
+                (r'\b\d{2}-\d{7}\b', '[REDACTED_TIN]'),
+                (r'\b4[0-9]{12}(?:[0-9]{3})?\b', '[REDACTED_CC]'),
+                (r'\b5[1-5][0-9]{14}\b', '[REDACTED_CC]'),
+                (r'\b3[47][0-9]{13}\b', '[REDACTED_CC]'),
+                (r'\b6(?:011|5[0-9]{2})[0-9]{12}\b', '[REDACTED_CC]'),
+                (r'\b(?:account\s*(?:no|number|#)?\s*:?\s*)\d{8,17}\b', '[REDACTED_FINANCIAL_ACCOUNT]'),
+                (r'\b(?:employee\s*(?:id|no|number|#)?\s*:?\s*)[A-Z0-9\-]{4,12}\b', '[REDACTED_EMPLOYEE_ID]'),
+                (r'\b(?:school\s*(?:id|no|number|#)?\s*:?\s*)[A-Z0-9\-]{4,12}\b', '[REDACTED_SCHOOL_ID]'),
+                (r'\b[A-HJ-NPR-Z0-9]{17}\b', '[REDACTED_VIN]'),
+                (r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b', '[REDACTED_IP]'),
+                (r'\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b', '[REDACTED_MAC]'),
+                (r'\b(?:ethnicity|race)\s*:?\s*[A-Za-z\s]{3,30}\b', '[REDACTED_ETHNICITY]'),
+                (r'\b(?:sexual\s*orientation)\s*:?\s*[A-Za-z\s]{3,30}\b', '[REDACTED_SEXUAL_ORIENTATION]'),
+                (r'\b(?:medical\s*record\s*(?:no|number|#)?\s*:?\s*)[A-Z0-9\-]{4,20}\b', '[REDACTED_MEDICAL_RECORD]'),
+            ]
+            try:
+                _raw = f.read()
+                try:
+                    _text = _raw.decode('utf-8', errors='replace')
+                    _is_binary = False
+                except Exception:
+                    _text = _raw
+                    _is_binary = True
+                if not _is_binary:
+                    _redacted = _text
+                    for _pat, _repl in _pii_patterns:
+                        if _repl is not None:
+                            _redacted = _re.sub(_pat, _repl, _redacted, flags=_re.IGNORECASE)
+                    if _redacted != _text:
+                        import logging as _pii_log
+                        _pii_log.getLogger('quivr.pii').warning(
+                            'PII detected and redacted in uploaded file: %s',
+                            getattr(f, 'name', '<unknown>')
+                        )
+                    _suffix = _os2.path.splitext(getattr(f, 'name', '.tmp'))[1] or '.tmp'
+                    _tmp = _tf.NamedTemporaryFile(
+                        mode='w', suffix=_suffix, delete=False, encoding='utf-8'
+                    )
+                    try:
+                        _tmp.write(_redacted)
+                        _tmp.flush()
+                        _tmp.seek(0)
+                        _tmp_name = _tmp.name
+                    finally:
+                        _tmp.close()
+                    _clean_fh = open(_tmp_name, 'r', encoding='utf-8')
+                    try:
+                        yield _clean_fh
+                    finally:
+                        _clean_fh.close()
+                        try:
+                            _os2.unlink(_tmp_name)
+                        except Exception:
+                            pass
+                else:
+                    import io as _io
+                    yield _io.BytesIO(_raw)
+            except Exception as _pii_exc:
+                import logging as _pii_log2
+                _pii_log2.getLogger('quivr.pii').error(
+                    'PII redaction failed for uploaded file, blocking yield: %s', _pii_exc
+                )
+                raise
         finally:
             await f.close()
 
