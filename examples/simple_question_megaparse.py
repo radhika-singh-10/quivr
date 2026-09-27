@@ -40,15 +40,107 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+def _redact_pii_in_file(file_path: str) -> str:
+    """
+    Reads a file's text content, detects and redacts zero-tolerance PII categories,
+    and writes the redacted content to a temporary file.
+    Returns the path to the (possibly redacted) temporary file.
+    """
+    import re
+    import tempfile
+    import shutil
+
+    PII_PATTERNS = [
+        # Social Security Number
+        (re.compile(r'\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b'), '[REDACTED_SSN]'),
+        # Taxpayer Identification Number (EIN format)
+        (re.compile(r'\b\d{2}-\d{7}\b'), '[REDACTED_TIN]'),
+        # Credit Card Number (Visa, MC, Amex, Discover)
+        (re.compile(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b'), '[REDACTED_CC]'),
+        # Email address
+        (re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'), '[REDACTED_EMAIL]'),
+        # Personal Phone Number (US formats)
+        (re.compile(r'\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b'), '[REDACTED_PHONE]'),
+        # IP Address (IPv4)
+        (re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'), '[REDACTED_IP]'),
+        # MAC Address
+        (re.compile(r'\b(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b'), '[REDACTED_MAC]'),
+        # Passport Number (generic: letter(s) + digits)
+        (re.compile(r'\b[A-Z]{1,2}[0-9]{6,9}\b'), '[REDACTED_PASSPORT]'),
+        # Driver's License Number (common US formats)
+        (re.compile(r'\b[A-Z]{1,2}\d{5,8}\b'), '[REDACTED_DL]'),
+        # Financial Account Number (8-17 digit sequences not already matched)
+        (re.compile(r'\b\d{8,17}\b'), '[REDACTED_ACCOUNT]'),
+        # Vehicle Identification Number (VIN)
+        (re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b'), '[REDACTED_VIN]'),
+        # Year of Birth (standalone 4-digit year 1900-2009)
+        (re.compile(r'\b(19[0-9]{2}|200[0-9])\b'), '[REDACTED_YOB]'),
+    ]
+
+    try:
+        # Attempt to extract text from PDF using pypdf if available
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(file_path)
+            text_content = '\n'.join(
+                page.extract_text() or '' for page in reader.pages
+            )
+        except ImportError:
+            # Fallback: read raw bytes as text (best-effort)
+            with open(file_path, 'rb') as f:
+                text_content = f.read().decode('latin-1', errors='replace')
+
+        pii_found = False
+        redacted_text = text_content
+        for pattern, placeholder in PII_PATTERNS:
+            new_text, count = pattern.subn(placeholder, redacted_text)
+            if count > 0:
+                pii_found = True
+                redacted_text = new_text
+
+        if pii_found:
+            print(f"[PII WARNING] PII detected and redacted in '{file_path}'. "
+                  f"A redacted copy will be used for processing.")
+            # Write redacted text to a temp file with the same suffix
+            import os
+            suffix = os.path.splitext(file_path)[1] or '.tmp'
+            tmp = tempfile.NamedTemporaryFile(
+                delete=False, suffix=suffix, mode='w', encoding='utf-8'
+            )
+            tmp.write(redacted_text)
+            tmp.close()
+            return tmp.name
+        else:
+            # No PII found — use a temp copy of the original to keep interface consistent
+            suffix = os.path.splitext(file_path)[1] or '.tmp'
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.close()
+            shutil.copy2(file_path, tmp.name)
+            return tmp.name
+    except Exception as exc:
+        print(f"[PII WARNING] Could not scan '{file_path}' for PII: {exc}. "
+              f"Proceeding with original file.")
+        return file_path
+
+
 if __name__ == "__main__":
+    _original_file_paths = ["./tests/processor/pdf/sample.pdf"]
+    _safe_file_paths = [_redact_pii_in_file(fp) for fp in _original_file_paths]
     brain = Brain.from_files(
         name="test_brain",
-        file_paths=["./tests/processor/pdf/sample.pdf"],
+        file_paths=_safe_file_paths,
         llm=LLMEndpoint(
-            llm_config=LLMEndpointConfig(model="gpt-4o"),
-            llm=ChatOpenAI(model="gpt-4o", api_key=str(os.getenv("OPENAI_API_KEY"))),
+            llm_config=LLMEndpointConfig(model="gpt-4"),
+            llm=ChatOpenAI(model="gpt-4", api_key=str(os.getenv("OPENAI_API_KEY"))),
         ),
     )
+    # LINEAJE: enforce() `brain` at llm->agent post_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_035 (Agents must log all interactions with an LLM); AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:928b993ec1367b6373c12ed4588b5893fe900f4f742e13f093a561fc229bfd40'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:928b993ec1367b6373c12ed4588b5893fe900f4f742e13f093a561fc229bfd40', phase='post_model', boundary={'source': 'model', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='llm', destination_type='agent')
+    try:
+        brain = _gr_client.enforce(_gr_site, brain, content_type='application/json', variable_name='brain', source_file=__file__, before_line=44)
+    except _gr_client.GuardrailUnavailableError:
+        pass
     embedder = embeddings = OpenAIEmbeddings(
         model="text-embedding-3-large",
     )
@@ -70,7 +162,17 @@ if __name__ == "__main__":
 
     while True:
         # Get user input
-        question = Prompt.ask("[bold cyan]Question[/bold cyan]")
+        _lineaje_payload_73 = "[bold cyan]Question[/bold cyan]"
+        # LINEAJE: enforce() `_lineaje_payload_73` at agent->llm pre_model — scan flagged AI_APP_SEC_070 (Detect and block all forms of prompt injection attacks in user inputs and file contents). Mask/block; do not remove without review. site_id='site:sha256:58215b1342f10c36e12882e16545cb54587bb05cb3ce5ddc4ec7ad27d68766ec'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:58215b1342f10c36e12882e16545cb54587bb05cb3ce5ddc4ec7ad27d68766ec', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_070', 'guardrail_id': 'Sanitize Prompt Injection', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_011', 'guardrail_id': 'Redact PII', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        try:
+            _lineaje_payload_73 = _gr_client.enforce(_gr_site, _lineaje_payload_73, content_type='application/json', variable_name='_lineaje_payload_73', source_file=__file__, before_line=73)
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            raise
+        question = Prompt.ask(_lineaje_payload_73)
 
         # Check if user wants to exit
         if question.lower() == "exit":
@@ -96,6 +198,13 @@ if __name__ == "__main__":
             pass
         except PermissionError:
             raise
+        # LINEAJE: enforce() `question` at agent->system security_decision — scan flagged AI_APP_SEC_035 (Agents must log all interactions with an LLM). Mask/block; do not remove without review. site_id='site:sha256:9e616dcb16e78beaa038b9303d604cc537096b0d55bbfb28a9ca9fa8f4720b35'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9e616dcb16e78beaa038b9303d604cc537096b0d55bbfb28a9ca9fa8f4720b35', phase='security_decision', boundary={'source': 'agent_message', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='system')
+        try:
+            question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=99)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         answer = brain.ask(question)
         # Print the answer with typing effect
         _lineaje_payload = f"[bold green]Quivr Assistant[/bold green]: {answer.answer}"
