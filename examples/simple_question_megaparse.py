@@ -49,6 +49,13 @@ if __name__ == "__main__":
             llm=ChatOpenAI(model="gpt-4o", api_key=str(os.getenv("OPENAI_API_KEY"))),
         ),
     )
+    # LINEAJE: enforce() `brain` at llm->agent post_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_035 (Agents must log all interactions with an LLM); AI_DAT_SEC_023 (Redact PII from uploaded files.). Mask/block; do not remove without review. site_id='site:sha256:928b993ec1367b6373c12ed4588b5893fe900f4f742e13f093a561fc229bfd40'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:928b993ec1367b6373c12ed4588b5893fe900f4f742e13f093a561fc229bfd40', phase='post_model', boundary={'source': 'model', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='llm', destination_type='agent')
+    try:
+        brain = _gr_client.enforce(_gr_site, brain, content_type='application/json', variable_name='brain', source_file=__file__, before_line=44)
+    except _gr_client.GuardrailUnavailableError:
+        pass
     embedder = embeddings = OpenAIEmbeddings(
         model="text-embedding-3-large",
     )
@@ -70,7 +77,17 @@ if __name__ == "__main__":
 
     while True:
         # Get user input
-        question = Prompt.ask("[bold cyan]Question[/bold cyan]")
+        _lineaje_payload_73 = "[bold cyan]Question[/bold cyan]"
+        # LINEAJE: enforce() `_lineaje_payload_73` at agent->llm pre_model — scan flagged AI_APP_SEC_070 (Detect and block all forms of prompt injection attacks in user inputs and file contents). Mask/block; do not remove without review. site_id='site:sha256:58215b1342f10c36e12882e16545cb54587bb05cb3ce5ddc4ec7ad27d68766ec'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:58215b1342f10c36e12882e16545cb54587bb05cb3ce5ddc4ec7ad27d68766ec', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_070', 'guardrail_id': 'Sanitize Prompt Injection', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_011', 'guardrail_id': 'Redact PII', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        try:
+            _lineaje_payload_73 = _gr_client.enforce(_gr_site, _lineaje_payload_73, content_type='application/json', variable_name='_lineaje_payload_73', source_file=__file__, before_line=73)
+        except _gr_client.GuardrailUnavailableError:
+            pass
+        except PermissionError:
+            raise
+        question = Prompt.ask(_lineaje_payload_73)
 
         # Check if user wants to exit
         if question.lower() == "exit":
@@ -96,6 +113,13 @@ if __name__ == "__main__":
             pass
         except PermissionError:
             raise
+        # LINEAJE: enforce() `question` at agent->system security_decision — scan flagged AI_APP_SEC_035 (Agents must log all interactions with an LLM). Mask/block; do not remove without review. site_id='site:sha256:9e616dcb16e78beaa038b9303d604cc537096b0d55bbfb28a9ca9fa8f4720b35'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:9e616dcb16e78beaa038b9303d604cc537096b0d55bbfb28a9ca9fa8f4720b35', phase='security_decision', boundary={'source': 'agent_message', 'sink': 'agent_message'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='system')
+        try:
+            question = _gr_client.enforce(_gr_site, question, content_type='application/json', variable_name='question', source_file=__file__, before_line=99)
+        except _gr_client.GuardrailUnavailableError:
+            pass
         answer = brain.ask(question)
         # Print the answer with typing effect
         _lineaje_payload = f"[bold green]Quivr Assistant[/bold green]: {answer.answer}"
