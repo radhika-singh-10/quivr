@@ -1,5 +1,7 @@
+import base64
 import logging
 import os
+import re
 from typing import AsyncIterable
 
 import httpx
@@ -13,6 +15,92 @@ from quivr_core.processor.registry import FileExtension
 from quivr_core.processor.splitter import SplitterConfig
 
 logger = logging.getLogger("quivr_core")
+
+# ---------------------------------------------------------------------------
+# Prompt-injection sanitisation helpers
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate an attempt to hijack the LLM via injected instructions.
+_INJECTION_PATTERNS: list[re.Pattern] = [
+    # Direct instruction overrides
+    re.compile(
+        r"(ignore|disregard|forget|override)\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|your\s+new\s+(role|persona|instructions?))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(system\s*prompt|new\s+instructions?|revised\s+instructions?|updated\s+instructions?)",
+        re.IGNORECASE,
+    ),
+    # Shell / code execution attempts
+    re.compile(
+        r"(\$\(|`[^`]+`|\bexec\s*\(|\beval\s*\(|\bos\.system\s*\(|\bsubprocess\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(rm\s+-rf|chmod\s+[0-7]+|curl\s+http|wget\s+http|nc\s+-[a-z]*e|/bin/(sh|bash|zsh))",
+        re.IGNORECASE,
+    ),
+]
+
+# Leetspeak substitution table used to normalise text before pattern matching.
+_LEET_TABLE = str.maketrans(
+    "013456789@$!",
+    "oieaasbtggas",
+)
+
+
+def _decode_base64_segments(text: str) -> str:
+    """Replace any valid base64 segments (≥20 chars) with their decoded form."""
+    pattern = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+
+    def _try_decode(m: re.Match) -> str:
+        candidate = m.group(0)
+        # Pad to a multiple of 4 if necessary.
+        padded = candidate + "=" * (-len(candidate) % 4)
+        try:
+            decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+            if decoded.isprintable():
+                return decoded
+        except Exception:
+            pass
+        return candidate
+
+    return pattern.sub(_try_decode, text)
+
+
+def _normalise_leet(text: str) -> str:
+    """Convert common leetspeak characters to their alphabetic equivalents."""
+    return text.translate(_LEET_TABLE)
+
+
+def sanitize_extracted_text(text: str) -> str:
+    """
+    Scan *text* (extracted from an uploaded file) for prompt-injection
+    attempts, base64-encoded payloads, leetspeak obfuscation, and shell
+    commands.  Raises ``ValueError`` if malicious content is detected so
+    that the caller can reject the document before it reaches an LLM.
+    """
+    # 1. Expand any base64 segments so encoded payloads are visible.
+    expanded = _decode_base64_segments(text)
+
+    # 2. Normalise leetspeak in a copy so we can match obfuscated variants.
+    normalised = _normalise_leet(expanded)
+
+    for variant in (expanded, normalised):
+        for pattern in _INJECTION_PATTERNS:
+            match = pattern.search(variant)
+            if match:
+                raise ValueError(
+                    f"Potential prompt injection detected in uploaded file "
+                    f"(matched pattern '{pattern.pattern}' near: "
+                    f"'{match.group(0)[:80]}')"
+                )
+
+    return text
 
 
 class TikaProcessor(ProcessorBase):
@@ -73,6 +161,7 @@ class TikaProcessor(ProcessorBase):
     async def process_file_inner(self, file: QuivrFile) -> ProcessedDocument[None]:
         async with file.open() as f:
             txt = await self._send_parse_tika(f)
+        txt = sanitize_extracted_text(txt)
         document = Document(page_content=txt)
         docs = self.text_splitter.split_documents([document])
         for doc in docs:

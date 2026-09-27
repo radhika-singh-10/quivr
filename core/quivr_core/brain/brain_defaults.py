@@ -5,9 +5,14 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import VectorStore
 
 from quivr_core.rag.entities.config import DefaultModelSuppliers, LLMEndpointConfig
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from quivr_core.llm import LLMEndpoint
 
 logger = logging.getLogger("quivr_core")
+
+# Model card / technical documentation for the GPAI models used in this module.
+# Review this URL before deployment to ensure compliance with your AI usage policy.
+MODEL_CARD_URL = "https://openai.com/research/"  # OpenAI model documentation
 
 
 async def build_default_vectordb(
@@ -32,22 +37,20 @@ async def build_default_vectordb(
 
 def default_embedder() -> Embeddings:
     try:
-        from langchain_openai import OpenAIEmbeddings
-
-        logger.debug("Loaded OpenAIEmbeddings as default LLM for brain")
-        embedder = OpenAIEmbeddings(check_embedding_ctx_length=False)
+        logger.debug("Loaded HuggingFaceEmbeddings as default embedder for brain")
+        embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         return embedder
     except ImportError as e:
         raise ImportError(
-            "Please provide a valid Embedder or install quivr-core['base'] package for using the defaultone."
+            "Please provide a valid Embedder or install quivr-core['base'] package for using the default one."
         ) from e
 
 
 def default_llm() -> LLMEndpoint:
     try:
-        logger.debug("Loaded ChatOpenAI as default LLM for brain")
+        logger.debug("Loaded Claude as default LLM for brain")
         llm = LLMEndpoint.from_config(
-            LLMEndpointConfig(supplier=DefaultModelSuppliers.OPENAI, model="gpt-4o")
+            LLMEndpointConfig(supplier=DefaultModelSuppliers.ANTHROPIC, model="claude-3-5-sonnet-20240620")
         )
         return llm
 

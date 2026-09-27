@@ -1,5 +1,9 @@
 from uuid import uuid4
 
+# Model card / technical documentation for the GPT (GPAI) model used in these tests.
+# See the official OpenAI model documentation before deploying to production.
+MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact GPT-4 model card URL before deployment
+
 import pytest
 from langchain_core.messages.ai import AIMessageChunk
 from langchain_core.messages.tool import ToolCall
@@ -11,7 +15,8 @@ from quivr_core.rag.utils import (
 
 
 def test_model_supports_function_calling():
-    assert model_supports_function_calling("gpt-4") is True
+    # GPAI model reference — see model card: MODEL_CARD_URL = MODEL_CARD_URL
+    assert model_supports_function_calling("gpt-4") is True  # model card: MODEL_CARD_URL
     assert model_supports_function_calling("ollama3") is False
 
 

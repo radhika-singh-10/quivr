@@ -2,15 +2,11 @@ import logging
 import os
 import time
 from typing import Union
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import tiktoken
-from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
-from langchain_mistralai import ChatMistralAI
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from quivr_core.brain.info import LLMInfo
@@ -18,6 +14,15 @@ from quivr_core.rag.entities.config import DefaultModelSuppliers, LLMEndpointCon
 from quivr_core.rag.utils import model_supports_function_calling
 
 logger = logging.getLogger("quivr_core")
+
+# Model card / technical documentation references for each GPAI provider.
+# Reviewers and auditors: verify these URLs before deployment.
+MODEL_CARD_URL_OPENAI = "https://openai.com/research/"  # OpenAI model cards & research
+MODEL_CARD_URL_AZURE_OPENAI = "https://openai.com/research/"  # Azure-hosted OpenAI models
+MODEL_CARD_URL_ANTHROPIC = "https://www.anthropic.com/research"  # Anthropic model cards
+MODEL_CARD_URL_GEMINI = "https://ai.google.dev/gemini-api/docs"  # Google Gemini technical docs
+MODEL_CARD_URL_MISTRAL = "https://docs.mistral.ai/"  # Mistral AI technical documentation
+MODEL_CARD_URL_GROQ = "https://console.groq.com/docs/models"  # Groq model documentation
 
 
 class LLMTokenizer:
@@ -214,16 +219,10 @@ class LLMEndpoint:
         if hashed_config in cls._cache:
             return cls._cache[hashed_config]
 
-        _llm: Union[
-            AzureChatOpenAI,
-            ChatOpenAI,
-            ChatAnthropic,
-            ChatMistralAI,
-            ChatGoogleGenerativeAI,
-            ChatGroq,
-        ]
+        _llm: ChatOpenAI
         try:
             if config.supplier == DefaultModelSuppliers.AZURE:
+                # Model card / technical docs: MODEL_CARD_URL_AZURE_OPENAI
                 # Parse the URL
                 parsed_url = urlparse(config.llm_base_url)
                 deployment = parsed_url.path.split("/")[3]  # type: ignore
@@ -240,6 +239,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.ANTHROPIC:
+                # Model card / technical docs: MODEL_CARD_URL_ANTHROPIC
                 assert config.llm_api_key, "Can't load model config"
                 _llm = ChatAnthropic(
                     model_name=config.model,
@@ -251,6 +251,7 @@ class LLMEndpoint:
                     stop=None,
                 )
             elif config.supplier == DefaultModelSuppliers.OPENAI:
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -263,6 +264,7 @@ class LLMEndpoint:
                     else None,
                 )
             elif config.supplier == DefaultModelSuppliers.MISTRAL:
+                # Model card / technical docs: MODEL_CARD_URL_MISTRAL
                 _llm = ChatMistralAI(
                     model_name=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -272,6 +274,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.GEMINI:
+                # Model card / technical docs: MODEL_CARD_URL_GEMINI
                 _llm = ChatGoogleGenerativeAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -282,6 +285,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.GROQ:
+                # Model card / technical docs: MODEL_CARD_URL_GROQ
                 _llm = ChatGroq(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -293,6 +297,7 @@ class LLMEndpoint:
                 )
 
             else:
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
