@@ -1,110 +1,6 @@
-# Copyright (c) Lineaje, Inc. All rights reserved.
-# gr_check() POSTs to GR_SERVICE_URL+/enforce; fail-open unless GRBlockedError.
-class GRBlockedError(Exception):
-    def __init__(self, policy_id, reason):
-        self.policy_id, self.reason = policy_id, reason
-        super().__init__("Guardrail block for policy %r: %s" % (policy_id, reason))
-
-def gr_check(data, source_type, destination_type, tenant_id="", timeout=5.0, **context):
-    import json as _j, logging as _lg, os as _os, urllib.error as _ue, urllib.request as _ur
-    _log = _lg.getLogger("lineaje.gr_client")
-    hop_label = source_type + "->" + destination_type
-    _prior = getattr(gr_check, "_blocked", None)
-    if _prior:
-        _log.warning("gr_client[%s]: skipping POST /enforce — request already blocked (%s)", hop_label, _prior[1])
-        raise GRBlockedError(_prior[0], _prior[1])
-    def _blk(o):
-        if isinstance(o, dict):
-            return any(_blk(o.get(k)) for k in ("skill_path", "skill_file", "path", "file_path", "data", "skill_manifest_path"))
-        s = str(o or "")
-        b = s.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        if b.endswith(".md.blocked"): return True
-        try:
-            if b in ("skill.md", "skills.md") and _os.path.isfile(str(o) + ".blocked"): return True
-        except Exception:
-            pass
-        return False
-    if _blk(data) or _blk(context):
-        _log.warning("gr_client[%s]: quarantined skill (*.blocked) — not loaded, GR not called", hop_label)
-        gr_check._blocked = ("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-        raise GRBlockedError("blocked_manifest", "quarantined skill must not be read, downloaded, or loaded")
-    url = _os.environ.get("GR_SERVICE_URL", "")
-    if not url:
-        return data
-    tid = tenant_id or _os.environ.get("GR_TENANT_ID", "")
-    # Refresh token first: the GR service exchanges it for the access JWT it
-    # calls the Data Service policy API with; a lineaje_pat_ PAT only
-    # identifies the caller and cannot be exchanged.
-    bearer = _os.environ.get("GR_BEARER_TOKEN") or _os.environ.get("LINEAJE_REFRESH_TOKEN") or _os.environ.get("LINEAJE_PAT_TOKEN") or _os.environ.get("LINEAJE_PAT", "")
-    params_key = "out_params" if destination_type == "agent" else "in_params"
-    def _gr_js(o):
-        # JSON form of non-JSON payloads (LangChain Document, pydantic models, ...).
-        if hasattr(o, "page_content"):
-            return {"page_content": o.page_content, "metadata": getattr(o, "metadata", None) or {}}
-        for _m in ("model_dump", "dict", "to_dict"):
-            _f = getattr(o, _m, None)
-            if callable(_f):
-                try:
-                    return _f()
-                except Exception:
-                    pass
-        if isinstance(o, (set, tuple)):
-            return list(o)
-        return str(o)
-    def _gr_back(orig, new):
-        # Map the (possibly masked) JSON back onto the caller's own objects.
-        if new == _j.loads(_j.dumps(orig, default=_gr_js)):
-            return orig
-        if isinstance(orig, (list, tuple)) and isinstance(new, list) and len(orig) == len(new):
-            _out = [_gr_back(a, b) for a, b in zip(orig, new)]
-            return tuple(_out) if isinstance(orig, tuple) else _out
-        if hasattr(orig, "page_content") and isinstance(new, dict) and "page_content" in new:
-            import copy as _cp
-            _c = _cp.copy(orig)
-            _c.page_content = new["page_content"]
-            if isinstance(new.get("metadata"), dict) and hasattr(_c, "metadata"):
-                _c.metadata = new["metadata"]
-            return _c
-        if orig is None or isinstance(orig, (str, int, float, bool, dict, list)):
-            return new
-        _log.warning("gr_client[%s]: masked result cannot be applied to %s — returning original", hop_label, type(orig).__name__)
-        return orig
-    try:
-        headers = {"Content-Type": "application/json"}
-        if bearer:
-            headers["Authorization"] = "Bearer " + bearer
-        _sent = _j.loads(_j.dumps(data, default=_gr_js))
-        body = {"source_type": source_type, "destination_type": destination_type, params_key: {"data": _sent}}
-        for _k, _v in context.items():
-            if _v:
-                body[_k] = _v
-        if tid:
-            body["tenant_id"] = tid
-        _base = url.rstrip("/")
-        if _base.lower().endswith("/enforce"): _base = _base[: -len("/enforce")].rstrip("/")
-        req = _ur.Request(_base + "/enforce", data=_j.dumps(body, default=_gr_js).encode(), headers=headers, method="POST")
-        with _ur.urlopen(req, timeout=timeout) as resp:
-            result = _j.loads(resp.read())
-    except Exception as exc:
-        if isinstance(exc, _ue.HTTPError) and exc.code == 403:
-            try: detail = _j.loads(exc.read()).get("detail", {})
-            except Exception: detail = {}
-            blocked_by = detail.get("blocked_by") or []
-            policy_id = blocked_by[0]["policy_id"] if blocked_by else "unknown"
-            reason = detail.get("message", "Request denied by policy enforcement.")
-            _log.warning("gr_client[%s]: BLOCKED by policy=%s — %s", hop_label, policy_id, reason)
-            if _os.environ.get("GR_BLOCK_MODE", "enforce").lower() == "audit":
-                return data
-            gr_check._blocked = (policy_id, reason)
-            raise GRBlockedError(policy_id, reason)
-        _log.warning("gr_client[%s]: GR service call failed (%s) — failing open", hop_label, exc)
-        return data
-    if result.get("status") == "escalate":
-        _log.warning("gr_client[%s]: escalation flagged — passing through for human review", hop_label)
-    if not isinstance(result.get("result"), dict) or "data" not in result["result"]:
-        return data
-    return _gr_back(data, result["result"]["data"])
+import base64
 import logging
+import re
 from abc import ABC, abstractmethod
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Generic, List, TypeVar
@@ -118,7 +14,108 @@ from quivr_core.language.utils import detect_language
 logger = logging.getLogger("quivr_core")
 
 
+def sanitize_for_llm(text: str) -> str:
+    """Sanitize text to prevent prompt injection attacks before passing to LLM contexts."""
+    import re
+    if not isinstance(text, str):
+        text = str(text)
+    # Remove common prompt injection patterns
+    injection_patterns = [
+        r"(?i)(ignore\s+(previous|above|prior|all)\s+(instructions?|prompts?|context|text))",
+        r"(?i)(disregard\s+(previous|above|prior|all)\s+(instructions?|prompts?|context|text))",
+        r"(?i)(forget\s+(previous|above|prior|all)\s+(instructions?|prompts?|context|text))",
+        r"(?i)(you\s+are\s+now\s+(a|an)?\s*\w+)",
+        r"(?i)(act\s+as\s+(a|an)?\s*\w+)",
+        r"(?i)(new\s+instructions?\s*:)",
+        r"(?i)(system\s*:\s*you)",
+        r"(?i)(\[\s*system\s*\])",
+        r"(?i)(\<\s*system\s*\>)",
+        r"(?i)(override\s+(previous|all)\s+(instructions?|prompts?))",
+        r"(?i)(jailbreak)",
+        r"(?i)(do\s+anything\s+now)",
+        r"(?i)(DAN\s+mode)",
+    ]
+    for pattern in injection_patterns:
+        text = re.sub(pattern, "[REDACTED]", text)
+    return text
+
+
 R = TypeVar("R", covariant=True)
+
+# Invisible / zero-width Unicode characters used to hide injected text
+_INVISIBLE_CHARS_RE = re.compile(
+    r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\ufeff]"
+)
+
+# Patterns that look like prompt-injection attempts
+_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    # Classic role-override phrases
+    re.compile(
+        r"(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(disregard\s+(all\s+)?(previous|prior|above)\s+instructions?)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(you\s+are\s+now\s+(?:a|an)\s+\w+)", re.IGNORECASE),
+    re.compile(r"(act\s+as\s+(?:a|an)\s+\w+)", re.IGNORECASE),
+    re.compile(r"(new\s+instructions?\s*:)", re.IGNORECASE),
+    re.compile(r"(system\s*:\s*you\s+are)", re.IGNORECASE),
+    # Shell command patterns
+    re.compile(r"(\$\(|`[^`]+`|;\s*rm\s+-|\|\s*bash|\|\s*sh\b)"),
+    re.compile(r"(\beval\s*\(|\bexec\s*\(|\bos\.system\s*\()"),
+    # Leetspeak injection markers (e.g. 1gn0r3 pr3v10us)
+    re.compile(r"(1gn[o0]r[e3]\s+[a-z0-9\s]+1nstruct)", re.IGNORECASE),
+]
+
+# Minimum length of a base64 chunk worth inspecting
+_B64_MIN_LEN = 40
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{" + str(_B64_MIN_LEN) + r",}={0,2}")
+
+
+def _decode_b64_if_injection(match: re.Match[str]) -> str:
+    """Return a placeholder if the base64 blob decodes to an injection attempt."""
+    candidate = match.group(0)
+    try:
+        decoded = base64.b64decode(candidate + "==").decode("utf-8", errors="ignore")
+    except Exception:
+        return candidate
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(decoded):
+            logger.warning(
+                "Removed base64-encoded prompt injection payload from document content."
+            )
+            return "[REDACTED]"
+    return candidate
+
+
+def sanitize_content(text: str) -> str:
+    """Remove or neutralise prompt-injection attempts from untrusted file content.
+
+    Checks performed:
+    * Invisible / zero-width Unicode characters
+    * Known prompt-override phrases
+    * Shell command patterns
+    * Leetspeak injection markers
+    * Base64-encoded payloads that decode to injection phrases
+    """
+    # 1. Strip invisible characters
+    text = _INVISIBLE_CHARS_RE.sub("", text)
+
+    # 2. Detect and redact base64-encoded injection payloads
+    text = _B64_RE.sub(_decode_b64_if_injection, text)
+
+    # 3. Flag plain-text injection patterns
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(text):
+            logger.warning(
+                "Potential prompt injection detected in uploaded file content; "
+                "offending segment redacted."
+            )
+            text = pattern.sub("[REDACTED]", text)
+
+    return text
 
 
 @dataclass
@@ -144,22 +141,6 @@ class ProcessorBase(ABC, Generic[R]):
         raise NotImplementedError
 
     async def process_file(self, file: QuivrFile) -> ProcessedDocument[R]:
-        _lineaje_payload = f"Processing file {file}"
-        try:
-            import asyncio as _gr_asyncio
-            _lineaje_payload = await _gr_asyncio.to_thread(gr_check, _lineaje_payload, "agent", "log", candidate_policies=['AI_APP_SEC_006'], site_id='site:sha256:8b74c8b50692a02c7980bd108bbeab948e28fa6426968c54f77324f72d05489f')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            _lineaje_payload = _lineaje_payload
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
-        _lineaje_payload_155 = f"Processing file {file}"
-        try:
-            import asyncio as _gr_asyncio
-            _lineaje_payload_155 = await _gr_asyncio.to_thread(gr_check, _lineaje_payload_155, "agent", "log", candidate_policies=['AI_APP_SEC_001', 'AI_APP_SEC_002', 'AI_APP_SEC_006', 'AI_APP_SEC_014', 'AI_APP_SEC_022', 'AI_APP_SEC_023', 'AI_APP_SEC_028', 'AI_APP_SEC_029', 'AI_APP_SEC_032', 'AI_APP_SEC_033', 'AI_APP_SEC_034', 'AI_APP_SEC_035', 'AI_APP_SEC_038', 'AI_APP_SEC_039', 'AI_APP_SEC_040', 'AI_APP_SEC_059', 'AI_APP_SEC_064', 'AI_APP_SEC_066', 'AI_APP_SEC_067', 'AI_APP_SEC_068', 'AI_APP_SEC_069', 'AI_APP_SEC_071', 'AI_APP_SEC_075', 'AI_APP_SEC_076', 'AI_APP_SEC_078', 'AI_APP_SEC_079', 'AI_DAT_SEC_001', 'AI_DAT_SEC_009', 'AI_DAT_SEC_010', 'AI_DAT_SEC_011', 'AI_DAT_SEC_012', 'AI_DAT_SEC_023', 'AI_DAT_SEC_024', 'AI_DAT_SEC_025', 'AI_DAT_SEC_027', 'AI_DAT_SEC_029', 'AI_DAT_SEC_030', 'AI_DAT_SEC_039', 'AI_IAC_002', 'AI_IAC_006', 'AI_IAC_007', 'AI_IAC_008', 'AI_IAC_009', 'AI_IAC_014', 'AI_IAC_015', 'AI_IAC_016', 'AI_IAC_017', 'AI_IAC_018', 'AI_IAC_020', 'AI_IAC_022', 'AI_IAC_023', 'AI_IAC_024', 'AI_IAC_025', 'AI_IAC_026', 'AI_IAC_027', 'AI_IAC_031', 'AI_VULN_SEC_002', 'AI_VULN_SEC_005', 'AI_VULN_SEC_006', 'AI_VULN_SEC_007'], site_id='site:sha256:97d01006e53e00f1b44aaa7e1b40e0d6b7d4f6a6d6dc1e88224a1c430edc43b7')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            _lineaje_payload_155 = _lineaje_payload_155
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->log' — passing data through unchecked")
         logger.debug(f"Processing file {file}")
         self.check_supported(file)
         docs = await self.process_file_inner(file)
@@ -170,7 +151,10 @@ class ProcessorBase(ABC, Generic[R]):
 
         for idx, doc in enumerate(docs.chunks, start=1):
             if "original_file_name" in doc.metadata:
-                doc.page_content = f"Filename: {doc.metadata['original_file_name']} Content: {doc.page_content}"
+                safe_filename = sanitize_for_llm(doc.metadata['original_file_name'])
+                safe_content = sanitize_for_llm(doc.page_content)
+                doc.page_content = f"Filename: {safe_filename} Content: {safe_content}"
+            doc.page_content = sanitize_content(doc.page_content)
             doc.page_content = doc.page_content.replace("\u0000", "")
             doc.page_content = doc.page_content.encode("utf-8", "replace").decode(
                 "utf-8"
@@ -186,20 +170,6 @@ class ProcessorBase(ABC, Generic[R]):
                 **doc.metadata,
                 **self.processor_metadata,
             }
-        try:
-            import asyncio as _gr_asyncio
-            docs = await _gr_asyncio.to_thread(gr_check, docs, "agent", "user_interface", candidate_policies=['AI_APP_SEC_006'], site_id='site:sha256:309ff589e93aa7b43f80a42c5dbea3abd3bdbeceec1908c295eb6917739fc7e3')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            docs = docs
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
-        try:
-            import asyncio as _gr_asyncio
-            docs = await _gr_asyncio.to_thread(gr_check, docs, "agent", "user_interface", candidate_policies=['AI_APP_SEC_001', 'AI_APP_SEC_002', 'AI_APP_SEC_006', 'AI_APP_SEC_022', 'AI_APP_SEC_023', 'AI_APP_SEC_028', 'AI_APP_SEC_029', 'AI_APP_SEC_032', 'AI_APP_SEC_034', 'AI_APP_SEC_035', 'AI_APP_SEC_038', 'AI_APP_SEC_039', 'AI_APP_SEC_040', 'AI_APP_SEC_059', 'AI_APP_SEC_064', 'AI_APP_SEC_066', 'AI_APP_SEC_067', 'AI_APP_SEC_068', 'AI_APP_SEC_069', 'AI_APP_SEC_071', 'AI_APP_SEC_075', 'AI_APP_SEC_076', 'AI_APP_SEC_078', 'AI_APP_SEC_079', 'AI_DAT_SEC_001', 'AI_DAT_SEC_009', 'AI_DAT_SEC_010', 'AI_DAT_SEC_011', 'AI_DAT_SEC_012', 'AI_DAT_SEC_023', 'AI_DAT_SEC_024', 'AI_DAT_SEC_025', 'AI_DAT_SEC_027', 'AI_DAT_SEC_029', 'AI_DAT_SEC_030', 'AI_DAT_SEC_039', 'AI_IAC_002', 'AI_IAC_007', 'AI_IAC_008', 'AI_IAC_009', 'AI_IAC_014', 'AI_IAC_015', 'AI_IAC_016', 'AI_IAC_017', 'AI_IAC_018', 'AI_IAC_020', 'AI_IAC_022', 'AI_IAC_023', 'AI_IAC_024', 'AI_IAC_025', 'AI_IAC_026', 'AI_IAC_027', 'AI_IAC_031', 'AI_VULN_SEC_002', 'AI_VULN_SEC_005', 'AI_VULN_SEC_006', 'AI_VULN_SEC_007'], site_id='site:sha256:e4ff6944da8974c823e447b3a098925794d1d8a77808518160aae99cabbdbf98')
-        except Exception as _gr_exc:
-            if type(_gr_exc).__name__ == "GRBlockedError": raise
-            docs = docs
-            __import__("logging").getLogger("lineaje.gr_client").warning("Lineaje guardrail unavailable at 'agent->user_interface' — passing data through unchecked")
         return docs
 
     @abstractmethod
