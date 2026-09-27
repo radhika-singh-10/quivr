@@ -20,6 +20,11 @@ class StrategyEnum(str, Enum):
     HI_RES = "hi_res"
 
 
+# Model card / technical documentation for the GPAI model used below.
+# See MODEL_CARD_URL for details on capabilities, limitations, and intended use.
+MODEL_CARD_URL = "https://openai.com/research/gpt-4o"  # GPT-4o model card
+
+
 class MegaparseBaseConfig(BaseModel):
     @classmethod
     def from_yaml(cls, file_path: str):
@@ -36,4 +41,4 @@ class MegaparseConfig(MegaparseBaseConfig):
     strategy: StrategyEnum = StrategyEnum.FAST
     check_table: bool = False
     parsing_instruction: str | None = None
-    model_name: str = "gpt-4o"
+    model_name: str = "claude-3-5-sonnet-20241022"
