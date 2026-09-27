@@ -2,9 +2,14 @@
 """Lineaje UnifAI Policy Scanner — GitHub Actions edition.
 
 Scans already-checked-out source code against Lineaje AI security policies and
-optionally opens a remediation PR built from the ``fix_code`` patches the policy
-engine returns. Designed to run on a GitHub-managed runner where the repository
-is already checked out.
+optionally opens a remediation PR built from the LLM remediation ``fix_code`` patches
+the policy engine returns (guardrail stubs, ``gr_stub_client.py`` and
+``.env`` files are never inserted; each patched Python file must still compile and
+define every name it uses, or its fix is dropped); the PR commits the
+patched files. The step summary also prints the exact ``entities.aientity.json`` and
+``findings.aifinding.json`` the server uploaded to Lineaje — in hybrid mode those are
+the only scan artifacts that leave the MCP host. Designed to run on a GitHub-managed
+(or self-hosted) runner where the repository is already checked out.
 
 Self-contained: the only SCM code here is a minimal GitHub REST client
 (:class:`GitHubClient`, defined below) covering the branch/commit/PR calls the
@@ -51,12 +56,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import builtins
+import importlib
+import fnmatch
 import json
 import ast
 import logging
 import os
 import pathlib
 import re
+import symtable
 import sys
 import tempfile
 import threading
@@ -75,7 +84,7 @@ logger = logging.getLogger("gha_repo_scan")
 # Constants
 # ===========================================================================
 
-MCP_SERVER_URL = "https://172.206.26.109/mcp"  # Put in your VM IP Address here
+MCP_SERVER_URL = "https://172.206.26.109/mcp"#"https://172.206.26.109/mcp"  # Put in your VM IP Address here
 
 
 def _mcp_http_client_with_extra_ca(headers=None, timeout=None, auth=None):
@@ -173,8 +182,112 @@ async def _streamablehttp_client_compat(
 
 MAX_SCAN_WORKERS = 4
 REMEDIATION_BRANCH_PREFIX = "remediation/unifai-gha"
+
+# Azure DevOps REST limits for the remediation PR (used by AzureDevOpsClient).
+AZURE_DEVOPS_API_VERSION = "7.1"
+AZURE_PR_TITLE_LIMIT = 400
 DEFAULT_UNIFAI_FILE_BATCH_SIZE = 100
 GITHUB_PR_BODY_SAFE_LIMIT = 60000
+# Azure DevOps rejects PR descriptions longer than 4000 characters.
+AZURE_PR_DESCRIPTION_LIMIT = 4000
+
+# Kept inline because this script is copied to customer CI runners and must
+# remain standalone. These values mirror scripts/gha_repo_scan.py.
+EVIDENCE_TYPE_SCM_SCAN = "scm_scan"
+MANIFEST_FILE_PATTERNS = frozenset({
+    "requirements.txt", "Pipfile", "pyproject.toml", "setup.py", "setup.cfg",
+    "*.toml", "environment.yml", "environment.yaml", "poetry.lock", "Pipfile.lock",
+    "package.json", "yarn.lock", "pom.xml", "project.xml", "build.gradle",
+    "build.gradle.kts", "build.gradle.mustache", "build.sbt", "Gemfile", "go.mod",
+    "Cargo.toml", "packages.config", "*.csproj", "*.fsproj", "*.vbproj",
+    "nuget.config", "Directory.Packages.props", "*.sln", "*.slnx", "vcpkg.json",
+    ".vcpkg-root", "composer.json", "Package.swift", "pubspec.yaml", "mix.exs",
+    "*.gemspec", "config.json",
+})
+LOCKFILE_BASENAMES = frozenset({
+    "bun.lockb", "flake.lock", "package-lock.json", "pnpm-lock.yaml", "bun.lock",
+    "gradle.lockfile", "Gemfile.lock", "go.sum", "Cargo.lock", "composer.lock",
+    "Package.resolved", "pubspec.lock", "mix.lock", "packages.lock.json",
+})
+_MANIFEST_LOCKFILE_EXCEPTIONS = frozenset({"yarn.lock", "poetry.lock", "Pipfile.lock"})
+ARCHIVE_EXCLUDE_DIRS = frozenset({
+    ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", "venv", ".venv",
+    "env", ".tox", "htmlcov", ".mypy_cache", ".ruff_cache", "node_modules",
+    ".yarn", ".pnp", "dist", "build", ".next", ".nuxt", "out", "coverage",
+    ".cache", "target", ".gradle", ".m2", "Pods", ".expo", ".idea", ".vscode",
+    ".lineaje-aiepo-security", ".lineaje", "migrations", "alembic",
+})
+ARCHIVE_EXCLUDE_GLOBS = frozenset({
+    "*.secret", "*.key", "*.pem", "*.env.*", "*.zip", "*.tar", "*.tar.gz",
+    "*.jar", "*.war", "*.swp", "*.swo", "*.lock", "package-lock.json",
+    "Gemfile.lock", "Cargo.lock", "composer.lock", "*.min.js", "*.min.css", "*.map",
+    "*_pb2.py", "*.pb.go", "*.pb.cc", "*.pb.h", "*.snap", "*README*",
+    "*readme*", "*Dockerfile*", "*dockerfile*", "*.dockerfile", "*.dockerignore",
+})
+BINARY_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".svg", ".woff",
+    ".woff2", ".ttf", ".eot", ".otf", ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".ppt", ".pptx", ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".exe",
+    ".dll", ".so", ".dylib", ".class", ".jar", ".war", ".pyc", ".pyo", ".o",
+    ".a", ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac", ".db", ".sqlite",
+    ".sqlite3",
+})
+_ARCHIVE_EXCLUDE_DIR_GLOBS = (".venv-*", "venv-*")
+
+
+def is_lockfile_basename(name: str) -> bool:
+    base = os.path.basename(str(name or ""))
+    lower = base.lower()
+    exceptions = {n.lower() for n in _MANIFEST_LOCKFILE_EXCEPTIONS}
+    lockfiles = {n.lower() for n in LOCKFILE_BASENAMES}
+    if lower in exceptions:
+        return False
+    return (
+        lower in lockfiles or lower.endswith(".lock") or lower.endswith(".lockfile")
+        or lower.endswith("-lock.json") or lower.endswith("-lock.yaml")
+    )
+
+
+def _is_manifest_basename(name: str) -> bool:
+    if is_lockfile_basename(name):
+        return False
+    return name in MANIFEST_FILE_PATTERNS or any(
+        fnmatch.fnmatch(name, pattern)
+        for pattern in MANIFEST_FILE_PATTERNS if "*" in pattern or "?" in pattern
+    )
+
+
+def archive_exclude_globs_keeping_manifests() -> Tuple[str, ...]:
+    return tuple(sorted(pattern for pattern in ARCHIVE_EXCLUDE_GLOBS if pattern not in MANIFEST_FILE_PATTERNS))
+
+
+def pin_manifests_to_first_batch(
+    file_list: List[str], batch_size: int,
+) -> Tuple[List[List[str]], List[str], List[str]]:
+    if batch_size <= 0:
+        batch_size = max(1, len(file_list) or 1)
+    filtered = [path for path in file_list if not is_lockfile_basename(os.path.basename(path))]
+    manifests = [path for path in filtered if _is_manifest_basename(os.path.basename(path))]
+    code = [path for path in filtered if not _is_manifest_basename(os.path.basename(path))]
+    code_batches = [code[i:i + batch_size] for i in range(0, len(code), batch_size)]
+    if not code_batches:
+        return ([manifests] if manifests else []), code, manifests
+    return [manifests + code_batches[0], *code_batches[1:]], code, manifests
+
+
+def split_batch_keeping_manifests_whole(
+    batch_files: List[str],
+) -> Optional[Tuple[List[str], List[str]]]:
+    if len(batch_files) < 2:
+        return None
+    manifests = [path for path in batch_files if _is_manifest_basename(os.path.basename(path))]
+    code = [path for path in batch_files if not _is_manifest_basename(os.path.basename(path))]
+    if not code:
+        return None
+    if len(code) == 1:
+        return (manifests, code) if manifests else None
+    midpoint = len(code) // 2
+    return manifests + code[:midpoint], code[midpoint:]
 
 _DEFAULT_LINEAJE_TOKEN_REFRESH_SKEW_SEC = 120
 _LINEAJE_NATIVE_RENEW_ACCESS_TOKEN_URL_PROD = (
@@ -441,17 +554,21 @@ def _identity_token_response_dict(raw_text: str, *, context: str) -> dict:
 
 
 class RefreshTokenTokenManager:
-    """Exchange LINEAJE_PAT_TOKEN for short-lived MCP access tokens, auto-renewing before expiry."""
+    """Exchange LINEAJE_PAT_TOKEN at the production identity endpoint.
+
+    The hybrid scanner intentionally does not honor endpoint overrides for
+    refresh-token exchange. Customer CI configuration may change the MCP
+    endpoint, but credentials must always be renewed by the production Lineaje
+    identity service.
+    """
 
     def __init__(self, refresh_token: str, renew_access_token_url: Optional[str] = None) -> None:
         self._refresh_token = _normalize_token(refresh_token)
         if not self._refresh_token:
             raise ValueError("LINEAJE_PAT_TOKEN must be non-empty")
-        self._renew_url = (
-            _normalize_url(renew_access_token_url)
-            or _normalize_url(os.environ.get("LINEAJE_RENEW_ACCESS_TOKEN_URL"))
-            or _LINEAJE_NATIVE_RENEW_ACCESS_TOKEN_URL_PROD
-        ).rstrip("/")
+        # Keep the optional argument for call-site compatibility, but never let
+        # it or LINEAJE_RENEW_ACCESS_TOKEN_URL redirect credentials elsewhere.
+        self._renew_url = _LINEAJE_NATIVE_RENEW_ACCESS_TOKEN_URL_PROD
         self._lock = threading.Lock()
         self._access_token = ""
         self._access_deadline = 0.0
@@ -517,35 +634,46 @@ def build_bearer_getter() -> Callable[[], str]:
 # ===========================================================================
 
 def collect_repo_files(local_path: str, exclude: Optional[List[str]] = None) -> List[str]:
-    """Every file under *local_path*, relative to it, minus the *exclude* roots.
+    """Collect the same useful source set as the standalone GHA scanner.
 
-    The GitHub edition of this scanner relied on the workflow running
-    ``rm -rf .git .github`` before the scan. An Azure Pipelines agent can reuse
-    its workspace across runs, so deleting the checkout's ``.git`` would break
-    the next run's incremental fetch; the pipeline passes ``--exclude`` instead
-    and the working tree is left untouched. The resulting scan input is the
-    same either way.
-
-    Each *exclude* entry is a path relative to *local_path* (``.git``,
-    ``.azuredevops``, ``docs/generated``) and prunes that file or whole subtree.
+    Explicit ``--exclude`` paths remain supported for Azure Pipelines. Common
+    VCS/vendor/build directories, generated files, secrets, binaries, and
+    dependency lockfiles are filtered without deleting anything in the checkout.
     """
     excluded = {_norm_rel_path(e) for e in (exclude or []) if e and e.strip()}
+    exclude_globs = archive_exclude_globs_keeping_manifests()
+
+    def explicitly_excluded(path: str) -> bool:
+        normalized = _norm_rel_path(path)
+        return any(normalized == item or normalized.startswith(item + "/") for item in excluded)
+
+    def excluded_dir(name: str, rel_path: str) -> bool:
+        return (
+            explicitly_excluded(rel_path)
+            or name in ARCHIVE_EXCLUDE_DIRS
+            or any(fnmatch.fnmatch(name, pattern) for pattern in _ARCHIVE_EXCLUDE_DIR_GLOBS)
+        )
+
     file_list: List[str] = []
     for root, dirs, filenames in os.walk(local_path):
         rel_root = _norm_rel_path(os.path.relpath(root, local_path))
         if rel_root == ".":
             rel_root = ""
-        if excluded:
-            dirs[:] = [
-                d for d in dirs
-                if _norm_rel_path(f"{rel_root}/{d}" if rel_root else d) not in excluded
-            ]
+        dirs[:] = [
+            directory for directory in dirs
+            if not excluded_dir(directory, f"{rel_root}/{directory}" if rel_root else directory)
+        ]
         for fname in filenames:
             rel_path = os.path.relpath(os.path.join(root, fname), local_path).replace("\\", "/")
-            if _norm_rel_path(rel_path) in excluded:
+            if explicitly_excluded(rel_path) or is_lockfile_basename(fname):
+                continue
+            if pathlib.Path(fname).suffix.lower() in BINARY_EXTENSIONS:
+                continue
+            if any(fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(fname, pattern)
+                   for pattern in exclude_globs):
                 continue
             file_list.append(rel_path)
-    return file_list
+    return sorted(file_list)
 
 # ===========================================================================
 # Archive creation
@@ -567,10 +695,13 @@ def create_batch_archive(
     head_sha: str,
     batch_index: Any = 0,
     run_id: str = "",
+    manifest_files: Optional[List[str]] = None,
 ) -> str:
+    extra_manifests = [path for path in (manifest_files or []) if path not in file_subset]
+    archive_files = list(file_subset) + extra_manifests
     archive_path = os.path.join(archive_dir, f"repo_scan_batch_{batch_index}.zip")
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel_path in file_subset:
+        for rel_path in archive_files:
             full_path = os.path.join(source_dir, rel_path)
             if os.path.isfile(full_path):
                 zf.write(full_path, rel_path)
@@ -582,10 +713,14 @@ def create_batch_archive(
             "scan_type": "full_repository",
             "batch_index": batch_index,
             "batch_file_count": len(file_subset),
+            "manifest_file_count": len(extra_manifests),
         }
         zf.writestr("user_metadata.json", json.dumps(metadata, indent=2))
     size_kb = os.path.getsize(archive_path) // 1024
-    logger.info("Batch archive #%s: %d files, %d KB", batch_index, len(file_subset), size_kb)
+    logger.info(
+        "Batch archive #%s: %d files + %d manifests, %d KB",
+        batch_index, len(file_subset), len(extra_manifests), size_kb,
+    )
     return archive_path
 
 
@@ -720,14 +855,6 @@ def _is_payload_too_large(exc: BaseException) -> bool:
     return "413" in text and ("Request Entity Too Large" in text or "Request body too large" in text)
 
 
-def _split_batch_in_half(batch_files: List[str]) -> Optional[Tuple[List[str], List[str]]]:
-    """Split a 413-retry batch in half. None when it cannot be split further."""
-    if len(batch_files) < 2:
-        return None
-    mid = len(batch_files) // 2
-    return batch_files[:mid], batch_files[mid:]
-
-
 def _loads_scan_payload(raw: str) -> dict:
     """Parse plain JSON or report-first MCP scan text (stdlib only).
     """
@@ -788,7 +915,7 @@ def _describe_exception(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-# Guardrail stub insertion 
+# Guardrail stub insertion
 _GR_CHECK_MARKERS: Dict[str, str] = {
     ".py": "def gr_check(",
     ".js": "function gr_check(",
@@ -969,6 +1096,351 @@ def _stub_insertions_from_mcp_result(mcp_result: Dict[str, Any]) -> List[Dict[st
     return _dedupe_stub_insertions(stubs)
 
 
+_MODULE_GLOBALS = frozenset({
+    "__file__", "__builtins__", "__path__", "__annotations__", "__dict__", "__cached__",
+})
+
+# stdlib modules never imported just to check an attribute (import side effects).
+_NO_PROBE_MODULES = frozenset({"antigravity", "this", "turtle", "turtledemo", "tkinter", "idlelib"})
+
+
+def _module_names_read_before_bound(tree: ast.Module) -> set:
+    """Names module-level code reads before the module binds them — a fix
+    that calls ``re.compile()`` at line 55 while another fix's ``import re``
+    lands at line 123. symtable ignores statement order and counts such a
+    name as defined; importing the file raises NameError. Function and lambda
+    bodies are skipped (they run later), as are annotations and class bodies."""
+    first_bound: dict = {}
+    reads: list = []
+
+    def _bind(name: str, line: int) -> None:
+        if name not in first_bound or line < first_bound[name]:
+            first_bound[name] = line
+
+    def _expr(node) -> None:
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if n is None or isinstance(n, ast.Lambda):
+                continue
+            if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                # Loop variables are local to the comprehension; only the first
+                # iterable is evaluated in the module's scope.
+                local = {t.id for g in n.generators for t in ast.walk(g.target) if isinstance(t, ast.Name)}
+                stack.append(n.generators[0].iter)
+                inner = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
+                inner += [x for g in n.generators for x in g.ifs] + [g.iter for g in n.generators[1:]]
+                reads.extend(
+                    x for part in inner for x in ast.walk(part)
+                    if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id not in local
+                )
+                continue
+            if isinstance(n, ast.Name):
+                if isinstance(n.ctx, ast.Load):
+                    reads.append(n)
+                else:
+                    _bind(n.id, n.lineno)
+                continue
+            if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+                _bind(n.target.id, n.lineno)
+            stack.extend(ast.iter_child_nodes(n))
+
+    def _stmts(body) -> None:
+        for s in body:
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for d in s.decorator_list:
+                    _expr(d)
+                if isinstance(s, ast.ClassDef):
+                    for b in s.bases + [k.value for k in s.keywords]:
+                        _expr(b)
+                else:
+                    for d in s.args.defaults + s.args.kw_defaults:
+                        _expr(d)
+                _bind(s.name, s.lineno)
+            elif isinstance(s, (ast.Import, ast.ImportFrom)):
+                for a in s.names:
+                    _bind((a.asname or a.name).split(".")[0], s.lineno)
+            elif isinstance(s, ast.AnnAssign):
+                _expr(s.value)
+                _expr(s.target)
+            elif isinstance(s, (ast.If, ast.While)):
+                _expr(s.test)
+                _stmts(s.body)
+                _stmts(s.orelse)
+            elif isinstance(s, (ast.For, ast.AsyncFor)):
+                _expr(s.iter)
+                _expr(s.target)
+                _stmts(s.body)
+                _stmts(s.orelse)
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                for item in s.items:
+                    _expr(item.context_expr)
+                    _expr(item.optional_vars)
+                _stmts(s.body)
+            elif isinstance(s, ast.Try) or type(s).__name__ == "TryStar":
+                _stmts(s.body)
+                for h in s.handlers:
+                    _expr(h.type)
+                    if h.name:
+                        _bind(h.name, h.lineno)
+                    _stmts(h.body)
+                _stmts(s.orelse)
+                _stmts(s.finalbody)
+            elif type(s).__name__ == "Match":
+                _expr(s.subject)
+                for case in s.cases:
+                    _expr(case.pattern)
+                    _expr(case.guard)
+                    _stmts(case.body)
+            else:
+                _expr(s)
+
+    _stmts(tree.body)
+    return {
+        n.id for n in reads
+        if n.id in first_bound and n.lineno < first_bound[n.id]
+    }
+
+
+def _undefined_names(source: str) -> Optional[set]:
+    """Names *source* reads that no enclosing scope binds — each one a
+    NameError when that code runs — or None when it can't be analysed
+    (syntax error, ``from x import *``).
+
+    Scope-aware via the stdlib ``symtable`` (the interpreter's own name
+    resolution): a helper defined inside one function is not visible from
+    another, and a parameter removed from a signature but still used in the
+    body is caught. Module-level code that reads a name above the line
+    that binds it counts as undefined too."""
+    try:
+        tree = ast.parse(source)
+        table = symtable.symtable(source, "<remediation>", "exec")
+    except (SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            return None
+
+    known = set(dir(builtins)) | _MODULE_GLOBALS
+    for sym in table.get_symbols():
+        if sym.is_assigned() or sym.is_imported() or sym.is_namespace():
+            known.add(sym.get_name())
+
+    # `global X` + an assignment inside a function also defines X at module level.
+    def _declared_globals(t: "symtable.SymbolTable") -> None:
+        for sym in t.get_symbols():
+            if sym.is_declared_global() and (sym.is_assigned() or sym.is_imported()):
+                known.add(sym.get_name())
+        for child in t.get_children():
+            _declared_globals(child)
+
+    _declared_globals(table)
+
+    undefined: set = set()
+
+    def _walk(t: "symtable.SymbolTable") -> None:
+        for sym in t.get_symbols():
+            name = sym.get_name()
+            if not sym.is_referenced() or name in known:
+                continue
+            if t.get_type() == "module" or sym.is_global():
+                undefined.add(name)
+        for child in t.get_children():
+            _walk(child)
+
+    _walk(table)
+    undefined |= _module_names_read_before_bound(tree)
+    return undefined
+
+
+def _undefined_new_names(new_content: str, original_content: str) -> List[str]:
+    """Names that are undefined in the patched file but weren't undefined in
+    the original — i.e. NameErrors the fix introduced (``os`` used with no
+    ``import os``, a removed parameter still used, a helper nested in the
+    wrong function)."""
+    new = _undefined_names(new_content)
+    if not new:
+        return []
+    old = _undefined_names(original_content) or set()
+    return sorted(new - old)
+
+
+def _stdlib_import_fixes(name: str, content: str) -> bool:
+    """True when ``import <name>`` makes every use of *name* in *content* work:
+    *name* is a stdlib module and each use is ``name.attr`` for an attribute
+    that module has. ``datetime.now(...)`` is not (that's the class, which
+    needs ``from datetime import datetime``)."""
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    if name not in stdlib or name.startswith("_") or name in _NO_PROBE_MODULES:
+        return False
+    try:
+        module = importlib.import_module(name)
+        tree = ast.parse(content)
+    except Exception:
+        return False
+    attrs: set = set()
+    attr_value_ids = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == name:
+            attrs.add(node.attr)
+            attr_value_ids.add(id(node.value))
+    bare = any(
+        isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
+        and id(node) not in attr_value_ids
+        for node in ast.walk(tree)
+    )
+    return bool(attrs) and not bare and all(hasattr(module, a) for a in attrs)
+
+
+# A model allowlist/registry name: APPROVED_MODEL_PREFIXES, ALLOWED_LLMS, ...
+_MODEL_ALLOWLIST_NAME_RE = re.compile(
+    r"(?i)(approved|allowed|allow|permitted|whitelist).*(model|llm)|(model|llm).*(approved|allowed|allowlist|permitted|whitelist)"
+)
+
+
+def _is_empty_collection(node: ast.AST) -> bool:
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in ("set", "frozenset", "list", "tuple", "dict")
+        and not node.keywords
+        and (not node.args or (len(node.args) == 1 and _is_empty_collection(node.args[0])))
+    )
+
+
+def _empty_model_allowlists(tree: ast.AST) -> Dict[str, str]:
+    """Model allowlists assigned an empty collection — every model then fails
+    the check, so the app refuses the models the organization approved."""
+    found: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not _is_empty_collection(value):
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name) and _MODEL_ALLOWLIST_NAME_RE.search(t.id):
+                found[f"allowlist:{t.id}"] = (
+                    f"line {node.lineno}: {t.id} is an empty model allowlist, so every model — "
+                    "including approved ones — is rejected"
+                )
+    return found
+
+
+# re.<func> → how many positional args it takes before an optional flags argument.
+_RE_PATTERN_FUNCS = {
+    "compile": 1, "match": 2, "search": 2, "fullmatch": 2, "findall": 2,
+    "finditer": 2, "split": 2, "sub": 3, "subn": 3,
+}
+
+
+def _runtime_errors(source: str) -> Optional[Dict[str, str]]:
+    """Code that fails every time it runs, keyed so the same problem in the
+    original matches: calls whose literal arguments raise (``str.maketrans("abc",
+    "ab")``, ``re.compile("(")``) and empty model allowlists. None when *source*
+    doesn't parse. compile() and the name check can't see these, and at module
+    level a raising call crashes the import."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    errors: Dict[str, str] = _empty_model_allowlists(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)):
+            continue
+        owner, attr = node.func.value.id, node.func.attr
+        try:
+            if owner in ("str", "bytes") and attr == "maketrans" and not node.keywords:
+                args = [ast.literal_eval(a) for a in node.args]
+                (str.maketrans if owner == "str" else bytes.maketrans)(*args)
+            elif (owner == "re" and attr in _RE_PATTERN_FUNCS and not node.keywords
+                  and len(node.args) == _RE_PATTERN_FUNCS[attr]):
+                # Only without flags: re.VERBOSE changes how the pattern parses.
+                pattern = ast.literal_eval(node.args[0])
+                if isinstance(pattern, (str, bytes)):
+                    re.compile(pattern)
+        except (ValueError, TypeError, re.error) as exc:
+            if isinstance(exc, ValueError) and "malformed node" in str(exc):
+                continue  # an argument isn't a literal
+            errors[ast.unparse(node)] = f"line {node.lineno}: {type(exc).__name__}: {exc}"
+        except (SyntaxError, MemoryError, RecursionError):
+            continue
+    return errors
+
+
+def _new_runtime_errors(new_content: str, original_content: str) -> List[str]:
+    """Always-failing code (see :func:`_runtime_errors`) the patch introduced."""
+    new = _runtime_errors(new_content)
+    if not new:
+        return []
+    old = _runtime_errors(original_content) or {}
+    return [msg for call, msg in new.items() if call not in old]
+
+
+def _add_missing_stdlib_imports(content: str, original_content: str) -> Tuple[str, List[str]]:
+    """Add ``import X`` for each undefined name the fixes introduced that a
+    stdlib import fixes. Returns (content, names still undefined)."""
+    missing = _undefined_new_names(content, original_content)
+    to_import = [n for n in missing if _stdlib_import_fixes(n, content)]
+    if not to_import:
+        return content, missing
+    lines = content.splitlines(keepends=True)
+    insert_at = safe_prefix_insert_index(lines)
+    # Prefer the end of the leading import block, so new imports sit with the rest.
+    for node in ast.parse(content).body:
+        if node.end_lineno <= insert_at:
+            continue  # docstring / __future__ imports
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            break
+        insert_at = node.end_lineno
+    if insert_at and insert_at <= len(lines) and not lines[insert_at - 1].endswith("\n"):
+        lines[insert_at - 1] += "\n"
+    lines[insert_at:insert_at] = [f"import {n}\n" for n in to_import]
+    logger.info("Added missing import(s) for fix: %s", ", ".join(to_import))
+    content = "".join(lines)
+    still = _undefined_new_names(content, original_content)
+    return content, still
+
+
+def _checked_server_content(rel: str, new_content: str, source_dir: str) -> Optional[str]:
+    """Server-sent whole-file content for *rel*, or None when committing it
+    would leave a Python file that can't be imported: a SyntaxError, or a name
+    the change uses but never defines. A missing stdlib import (``os``,
+    ``time``, …) is added instead of rejecting the file. Non-Python files, and
+    Python files that didn't compile before the change, pass through."""
+    if not rel.endswith(".py"):
+        return new_content
+    original = ""
+    abs_path = os.path.join(source_dir, rel)
+    if os.path.isfile(abs_path):
+        with open(abs_path, encoding="utf-8", errors="replace") as fh:
+            original = fh.read()
+        if validate_python_source(original, rel) is not None:
+            return new_content
+    syntax_err = validate_python_source(new_content, rel)
+    if syntax_err:
+        logger.warning("Skipped remediation for %s — it would not compile: %s", rel, syntax_err)
+        return None
+    raises = _new_runtime_errors(new_content, original)
+    if raises:
+        logger.warning("Skipped remediation for %s — it would fail on every run: %s", rel, "; ".join(raises))
+        return None
+    content, undefined = _add_missing_stdlib_imports(new_content, original)
+    if undefined:
+        logger.warning(
+            "Skipped remediation for %s — it uses undefined name(s): %s", rel, ", ".join(undefined),
+        )
+        return None
+    return content
+
+
 def apply_stub_insertions_to_clone(
     stub_insertions: List[Dict[str, Any]],
     source_dir: str,
@@ -989,7 +1461,9 @@ def apply_stub_insertions_to_clone(
         if s.get("new_content"):
             # Server already instrumented the extracted archive — write the
             # whole file rather than re-applying proposed_stub line-by-line.
-            validated[rel] = s["new_content"]
+            content = _checked_server_content(rel, s["new_content"], source_dir)
+            if content is not None:
+                validated[rel] = content
             continue
         if rel in validated:
             continue
@@ -1222,6 +1696,9 @@ def _run_mcp_scan_via_client(
                 presigned_url = upload_result["presigned_url"]
                 resolved_sbom = (upload_result.get("sbom_id") or resolved_sbom or "").strip()
                 resolved_run_id = (upload_result.get("run_id") or resolved_run_id or "").strip()
+                # False when a hybrid server kept the source on its own host; missing
+                # (None) on servers older than that flag.
+                source_s3_uploaded = upload_result.get("source_archive_s3_uploaded")
 
 
         if presigned_url:
@@ -1259,6 +1736,9 @@ def _run_mcp_scan_via_client(
                     result["sbom_id"] = resolved_sbom
                 if resolved_run_id and not (result.get("run_id") or "").strip():
                     result["run_id"] = resolved_run_id
+                result["source_archive_s3_uploaded"] = (
+                    True if presigned_url else source_s3_uploaded
+                )
                 return result
 
     return asyncio.run(_scan())
@@ -1297,15 +1777,18 @@ def parallel_batch_scan(
     server_url: str,
     bearer_getter: Callable[[], str],
     max_workers: int = MAX_SCAN_WORKERS,
+    manifest_files: Optional[List[str]] = None,
 ) -> Tuple[
     List[Dict[str, Any]], List[Dict[str, Any]], List[str], List[Dict[str, str]],
-    int, List[str], List[Dict[str, Any]],
+    int, List[str], List[Dict[str, Any]], Dict[str, Any],
 ]:
     all_violations: List[Dict[str, Any]] = []
     all_remediation_actions: List[Dict[str, Any]] = []
     all_reports: List[str] = []
     all_aibom: List[Dict[str, str]] = []
     all_stub_insertions: List[Dict[str, Any]] = []
+    # What the server PUT to Lineaje S3, plus whether any batch's source archive went too.
+    uploaded: Dict[str, Any] = {"entities": [], "findings": [], "source_archive_s3_uploaded": None}
     aibom_seen: set = set()
     failed_batch_count = 0
     failure_details: List[str] = []
@@ -1318,6 +1801,7 @@ def parallel_batch_scan(
         archive_path = create_batch_archive(
             source_dir, temp_dir, batch_files,
             source_code_repo, branch, head_sha, label, run_id=run_id,
+            manifest_files=manifest_files if str(label) == "1" else None,
         )
         result = run_mcp_scan(
             server_url, bearer_getter, source_code_repo, branch, batch_files, archive_path,
@@ -1339,7 +1823,7 @@ def parallel_batch_scan(
             try:
                 return [(label, _scan_leaf(label, files))]
             except BaseException as exc:
-                split = _split_batch_in_half(files) if _is_payload_too_large(exc) else None
+                split = split_batch_keeping_manifests_whole(files) if _is_payload_too_large(exc) else None
                 if not split:
                     raise
                 first_half, second_half = split
@@ -1375,6 +1859,12 @@ def parallel_batch_scan(
             all_stub_insertions.extend(batch_stub_insertions)
             if batch_report:
                 all_reports.append(batch_report)
+            uploaded["entities"].extend(mcp_result.get("uploaded_entities_json") or [])
+            uploaded["findings"].extend(mcp_result.get("uploaded_findings_json") or [])
+            src_flag = mcp_result.get("source_archive_s3_uploaded")
+            if src_flag is not None:
+                uploaded["source_archive_s3_uploaded"] = bool(
+                    uploaded["source_archive_s3_uploaded"]) or bool(src_flag)
             for entry in batch_aibom:
                 key = (entry.get("name", ""), entry.get("source_file", ""))
                 if key not in aibom_seen:
@@ -1398,7 +1888,7 @@ def parallel_batch_scan(
 
     return (
         all_violations, all_remediation_actions, all_reports, all_aibom,
-        failed_batch_count, failure_details, all_stub_insertions,
+        failed_batch_count, failure_details, all_stub_insertions, uploaded,
     )
 
 # ===========================================================================
@@ -1445,18 +1935,41 @@ def _table_rows(block: str) -> Tuple[Optional[str], Optional[str], List[str]]:
             header = s
         elif sep is None:
             sep = s
-        else:
+        elif not _is_placeholder_row(s):
             data.append(s)
     return header, sep, data
 
 
+_ENFORCEMENT_PLACEHOLDERS = ("No violations detected.",)
+_ENFORCEMENT_COUNT_RE = re.compile(r"(\d+)\s+(remediated|notified)")
+
+
 def _enforcement_bullet_lines(block: str) -> List[str]:
-    """Bullet lines in an Enforcement Summary block — anything that isn't the
-    italic "…and N more" line, the "**Summary:**" line, or a table row."""
+    """Item lines in an Enforcement Summary block (``ℹ️ **Notified:** …``) —
+    not the italic "…and N more" line, the "**Summary:**" line, table rows,
+    ``---`` dividers or the "No violations detected." placeholder."""
     return [
         line.strip() for line in block.splitlines()
-        if line.strip() and not line.strip().startswith(("*", "#", "|"))
+        if line.strip()
+        and not line.strip().startswith(("*", "#", "|", "---"))
+        and line.strip() not in _ENFORCEMENT_PLACEHOLDERS
     ]
+
+
+def _enforcement_counts(block: str) -> Dict[str, int]:
+    """``**Summary:** 3 remediated, 2 notified`` → {"remediated": 3, "notified": 2}."""
+    counts = {"remediated": 0, "notified": 0}
+    for line in block.splitlines():
+        if line.strip().startswith("**Summary:**"):
+            for n, kind in _ENFORCEMENT_COUNT_RE.findall(line):
+                counts[kind] += int(n)
+    return counts
+
+
+def _is_placeholder_row(row: str) -> bool:
+    """``| — | — | … |`` rows a batch emits when its table is empty."""
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    return bool(cells) and cells[0] == "—"
 
 
 def _mermaid_body(block: str) -> str:
@@ -1534,6 +2047,7 @@ def _merge_batch_reports(
 
     project_scanned = ""
     enforcement_bullets: List[str] = []
+    enforcement_counts = {"remediated": 0, "notified": 0}
     s1_header = s1_sep = None
     s1_rows: List[str] = []
     s2_header = s2_sep = None
@@ -1551,7 +2065,10 @@ def _merge_batch_reports(
             if m:
                 project_scanned = m.group(1)
 
-        enforcement_bullets.extend(_enforcement_bullet_lines(sections.get("## Enforcement Summary", "")))
+        enforcement_block = sections.get("## Enforcement Summary", "")
+        enforcement_bullets.extend(_enforcement_bullet_lines(enforcement_block))
+        for kind, n in _enforcement_counts(enforcement_block).items():
+            enforcement_counts[kind] += n
 
         h, sep, rows = _table_rows(sections.get("### SECTION 1: AIBOM Discovery", ""))
         s1_header, s1_sep = s1_header or h, s1_sep or sep
@@ -1600,16 +2117,25 @@ def _merge_batch_reports(
     lines.append("")
     lines.append("## Enforcement Summary")
     lines.append("")
-    preview = enforcement_bullets[:_ENFORCEMENT_PREVIEW_CAP]
-    for bullet in preview:
-        lines.append(bullet)
+    enforcement_bullets = _dedupe_preserve_order(enforcement_bullets)
+    notified = max(enforcement_counts["notified"], len(enforcement_bullets))
+    remediated = enforcement_counts["remediated"]
+    if not total_violations:
+        lines.append("No violations detected.")
         lines.append("")
-    remaining = total_violations - len(preview)
-    if remaining > 0:
-        lines.append(f"*… and {remaining} more violation(s) — see **SECTION 3: Controls Enforced** below.*")
-        lines.append("")
-    lines.append(f"**Summary:** {len(preview)} notified")
-    lines.append("")
+    else:
+        preview = enforcement_bullets[:_ENFORCEMENT_PREVIEW_CAP]
+        for bullet in preview:
+            lines.append(bullet)
+            lines.append("")
+        remaining = notified - len(preview)
+        if remaining > 0:
+            lines.append(f"*… and {remaining} more violation(s) — see **SECTION 3: Controls Enforced** below.*")
+            lines.append("")
+        parts = [f"{n} {kind}" for kind, n in (("remediated", remediated), ("notified", notified)) if n]
+        if parts:
+            lines.append(f"**Summary:** {', '.join(parts)}")
+            lines.append("")
     lines.append("---")
     lines.append("")
     lines.append("### SECTION 1: AIBOM Discovery")
@@ -1618,6 +2144,9 @@ def _merge_batch_reports(
     lines.append("")
     if s1_header:
         lines.extend([s1_header, s1_sep, *s1_rows])
+    if not s1_rows:
+        lines.append("")
+        lines.append("*No AI components discovered.*")
     lines.append("")
     lines.append("### SECTION 2: Policy Violations")
     lines.append("")
@@ -1672,6 +2201,10 @@ def build_json_output(
     remediation_pr_url: str = "",
     failed_remediation_files: Optional[List[str]] = None,
     scan_errors: Optional[List[str]] = None,
+    remediation_actions: Optional[List[Dict[str, Any]]] = None,
+    uploaded_entities: Optional[List[Dict[str, Any]]] = None,
+    uploaded_findings: Optional[List[Dict[str, Any]]] = None,
+    source_archive_s3_uploaded: Optional[bool] = None,
 ) -> Dict[str, Any]:
     return {
         "status": status,
@@ -1692,6 +2225,10 @@ def build_json_output(
         "remediation_branch": remediation_branch,
         "remediation_pr_url": remediation_pr_url,
         "failed_remediation_files": failed_remediation_files or [],
+        "remediation_actions": remediation_actions or [],
+        "uploaded_entities": uploaded_entities or [],
+        "uploaded_findings": uploaded_findings or [],
+        "source_archive_s3_uploaded": source_archive_s3_uploaded,
         "scan_errors": scan_errors or [],
     }
 
@@ -1733,6 +2270,7 @@ def print_human_output(output: Dict[str, Any]) -> None:
     if not violations:
         if status == "compliant":
             print("\nNo violations found.")
+        _print_uploaded_artifacts(output)
         return
 
     from collections import defaultdict
@@ -1752,6 +2290,44 @@ def print_human_output(output: Dict[str, Any]) -> None:
         numbered = "".join(f"{i}. {c}<br>" for i, c in enumerate(controls, 1))
         print(f"| `{file_}` | {numbered} |")
 
+    _print_uploaded_artifacts(output)
+
+
+# GitHub caps a step summary at 1 MiB; keep each JSON well under half of that.
+UPLOADED_JSON_SUMMARY_LIMIT = int(os.environ.get("UNIFAI_UPLOADED_JSON_SUMMARY_LIMIT", "400000"))
+
+
+def _print_uploaded_artifacts(output: Dict[str, Any]) -> None:
+    """Print the entities/findings JSON the server uploaded to Lineaje, verbatim."""
+    artifacts = [
+        ("entities.aientity.json", output.get("uploaded_entities") or []),
+        ("findings.aifinding.json", output.get("uploaded_findings") or []),
+    ]
+    if not any(items for _, items in artifacts):
+        return
+    print("\n### Uploaded to Lineaje\n")
+    src = output.get("source_archive_s3_uploaded")
+    if src is False:
+        print(
+            "*Only these scan results were uploaded. The source code stayed on the "
+            "MCP host (hybrid mode) and was not uploaded.*\n"
+        )
+    elif src:
+        print("*The source archive was also uploaded to Lineaje (SaaS mode, or "
+              "UNIFAI_FORCE_S3_ARCHIVE_UPLOAD=true).*\n")
+    for name, items in artifacts:
+        text = json.dumps(items, indent=2, default=str)
+        truncated = len(text) > UPLOADED_JSON_SUMMARY_LIMIT
+        if truncated:
+            text = text[:UPLOADED_JSON_SUMMARY_LIMIT].rstrip() + "\n… (truncated)"
+        # Full copy always goes to the job log (stderr), even when the summary truncates.
+        logger.info("Uploaded %s (%d item(s)):\n%s", name, len(items), json.dumps(items, indent=2, default=str))
+        print(f"<details><summary><code>{name}</code> — {len(items)} item(s)"
+              f"{' (truncated; full JSON in the job log)' if truncated else ''}</summary>\n")
+        print("```json")
+        print(text)
+        print("```\n</details>\n")
+
 
 # ===========================================================================
 # Patch application (ported from veracode_repo_scan.py, no external deps)
@@ -1761,16 +2337,48 @@ def _normalize_for_patch_match(s: str) -> str:
     return re.sub(r"[ \t]+", " ", s)
 
 
-def _apply_fix_entry(content: str, original: str, replacement: str) -> Tuple[str, bool]:
-    if not original:
-        return content, False
+def _reindent_replacement(content: str, start: int, replacement: str) -> Tuple[int, str]:
+    """(start, replacement) with *replacement* re-indented to the file.
 
-    if original in content:
-        return content.replace(original, replacement, 1), True
+    When a match starts inside a line's leading indentation (the LLM quoted
+    ``original`` with or without its indent), replace from the start of that
+    line instead, and shift every line of *replacement* so its first line has
+    the file's indentation — the lines below keep their indentation relative to
+    it. Without this, an ``original`` quoted without its indent keeps the file's
+    indent and adds the replacement's own (or none): "unexpected indent" /
+    "unindent does not match any outer indentation level"."""
+    line_start = content.rfind("\n", 0, start) + 1
+    if content[line_start:start].strip():
+        return start, replacement  # match starts mid-line — leave it
+    line_end = content.find("\n", line_start)
+    line = content[line_start: line_end if line_end != -1 else len(content)]
+    target = line[: len(line) - len(line.lstrip())]
+    rep_lines = replacement.split("\n")
+    first = next((l for l in rep_lines if l.strip()), "")
+    base = first[: len(first) - len(first.lstrip())]
+    shifted = []
+    for l in rep_lines:
+        if not l.strip():
+            shifted.append("")
+        elif l.startswith(base):
+            shifted.append(target + l[len(base):])
+        else:
+            shifted.append(target + l.lstrip())
+    return line_start, "\n".join(shifted)
+
+
+def _find_fix_span(content: str, original: str) -> Optional[Tuple[int, int]]:
+    """(start, end) of the text in *content* that *original* quotes, or None."""
+    idx = content.find(original)
+    if idx != -1:
+        return idx, idx + len(original)
 
     orig_stripped = original.strip()
-    if orig_stripped and orig_stripped in content:
-        return content.replace(orig_stripped, replacement, 1), True
+    if not orig_stripped:
+        return None
+    idx = content.find(orig_stripped)
+    if idx != -1:
+        return idx, idx + len(orig_stripped)
 
     norm_orig = _normalize_for_patch_match(orig_stripped)
     norm_content = _normalize_for_patch_match(content)
@@ -1790,7 +2398,7 @@ def _apply_fix_entry(content: str, original: str, replacement: str) -> Tuple[str
         if orig_stripped in sub:
             actual_idx = content.find(orig_stripped, real_idx)
             if actual_idx != -1:
-                return content[:actual_idx] + replacement + content[actual_idx + len(orig_stripped):], True
+                return actual_idx, actual_idx + len(orig_stripped)
 
     orig_lines = [l for l in orig_stripped.splitlines() if l.strip()]
     if orig_lines:
@@ -1801,11 +2409,20 @@ def _apply_fix_entry(content: str, original: str, replacement: str) -> Tuple[str
                 end_search = content.find(orig_lines[-1].strip(), anchor_idx) if len(orig_lines) > 1 else anchor_idx
                 if end_search != -1:
                     end_idx = end_search + len(orig_lines[-1].strip())
-                    found_block = content[anchor_idx:end_idx]
-                    if len(found_block) < len(orig_stripped) * 2:
-                        return content[:anchor_idx] + replacement + content[end_idx:], True
+                    if end_idx - anchor_idx < len(orig_stripped) * 2:
+                        return anchor_idx, end_idx
+    return None
 
-    return content, False
+
+def _apply_fix_entry(content: str, original: str, replacement: str) -> Tuple[str, bool]:
+    if not original:
+        return content, False
+    span = _find_fix_span(content, original)
+    if span is None:
+        return content, False
+    start, end = span
+    start, replacement = _reindent_replacement(content, start, replacement)
+    return content[:start] + replacement + content[end:], True
 
 
 def _norm_rel_path(p: str) -> str:
@@ -1844,6 +2461,195 @@ def _resolve_source_file(source_dir: str, filepath: str, file_list: List[str]) -
     return None, None
 
 
+_STUB_RUNTIME_FILES = frozenset({"gr_stub_client.py"})
+_ENV_FILE_RE = re.compile(r"^\.env(\..+)?$")
+
+
+def _is_stub_or_env_file(rel: str) -> bool:
+    """Guardrail-stub runtime files and .env files — never part of an LLM remediation PR."""
+    name = pathlib.PurePosixPath(_norm_rel_path(rel)).name
+    return name in _STUB_RUNTIME_FILES or bool(_ENV_FILE_RE.match(name))
+
+
+_CLOSER_LINE_RE = re.compile(r"^\s*[\)\]\}][\)\]\},;:\s]*$")
+
+
+def _reindent_from_body(replacement: str) -> str:
+    """*replacement* with lines 2+ re-based on their own smallest indent — for an
+    LLM answer that dropped the first line's indent but kept the rest (common
+    when code is quoted inside a JSON string). ``_reindent_replacement`` then
+    lines the block up with the file."""
+    lines = replacement.split("\n")
+    rest = [l for l in lines[1:] if l.strip()]
+    if not rest:
+        return replacement
+    first_indent = len(lines[0]) - len(lines[0].lstrip())
+    base = min(len(l) - len(l.lstrip()) for l in rest)
+    if base <= first_indent:
+        return replacement
+    shift = base - first_indent
+    return "\n".join([lines[0]] + [l[shift:] if l.strip() else l for l in lines[1:]])
+
+
+def _apply_fix_entry_checked(
+    content: str, original: str, replacement: str, rel_path: str, check_python: bool,
+) -> Tuple[Optional[str], str]:
+    """(patched content, "") or (None, reason). For Python, a fix that breaks the
+    file is retried with the two repairs matching the usual LLM mistakes before
+    it is given up on: the replacement already closes a call whose closing
+    bracket lines are still in the file ("unmatched ')'"), or its lines 2+
+    carry indentation the first line lost ("unexpected indent")."""
+    span = _find_fix_span(content, original)
+    if span is None:
+        return None, "not found"
+
+    def _splice(rep: str, end: int) -> str:
+        start, rep = _reindent_replacement(content, span[0], rep)
+        return content[:start] + rep + content[end:]
+
+    def _raises(patched: str) -> str:
+        found = _new_runtime_errors(patched, content)
+        return "it would fail on every run: " + "; ".join(found) if found else ""
+
+    patched = _splice(replacement, span[1])
+    if not check_python:
+        return patched, ""
+    err = validate_python_source(patched, rel_path)
+    if not err:
+        raises = _raises(patched)
+        return (None, raises) if raises else (patched, "")
+
+    candidates = [_reindent_from_body(replacement)] if _reindent_from_body(replacement) != replacement else []
+    candidates.append(replacement)
+    for rep in candidates:
+        end = span[1]
+        for _ in range(4):  # also swallow up to 4 closing-bracket-only lines after the span
+            tried = _splice(rep, end)
+            if validate_python_source(tried, rel_path) is None:
+                raises = _raises(tried)
+                return (None, raises) if raises else (tried, "")
+            nl = content.find("\n", end)
+            if nl == -1:
+                break
+            next_end = content.find("\n", nl + 1)
+            next_end = len(content) if next_end == -1 else next_end
+            if not _CLOSER_LINE_RE.match(content[nl + 1:next_end]):
+                break
+            end = next_end
+    return None, err
+
+
+def _uses_any(text: str, names: List[str]) -> List[str]:
+    return [n for n in names if re.search(r"(?<![\w.])" + re.escape(n) + r"\b", text)]
+
+
+_TOP_LEVEL_DEF_RE = re.compile(
+    r"^(?:async\s+def|def|class)\s+([A-Za-z_]\w*)|^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", re.M,
+)
+
+
+def _def_line(text: str, m: "re.Match") -> str:
+    """The whole line a ``_TOP_LEVEL_DEF_RE`` match starts on, stripped."""
+    end = text.find("\n", m.start())
+    return text[m.start(): end if end != -1 else len(text)].strip()
+
+
+def _module_level_names(source: str) -> set:
+    """Names bound at module level in *source* (assignments, defs, classes, imports)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {m.group(1) or m.group(2) for m in _TOP_LEVEL_DEF_RE.finditer(source)}
+    names: set = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        names.add(n.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name.split(".")[0]) for a in node.names)
+    return names
+
+
+def _dedupe_fix_definitions(
+    original_content: str, actions: List[Dict[str, Any]], filepath: str,
+) -> List[List[Dict[str, Any]]]:
+    """Per action, its fix_code entries with colliding module-level names renamed.
+
+    Each policy's fix is generated on its own, so two fixes for one file often
+    both add e.g. ``_INJECTION_PATTERNS`` — one a regex, one a list — and
+    whichever is defined last silently replaces the other at import time
+    ("'list' object has no attribute 'search'"). A name a fix *defines* at
+    module level that the file or an earlier fix already defines is renamed
+    (``_INJECTION_PATTERNS`` -> ``_INJECTION_PATTERNS_2``) everywhere inside
+    that one fix, so both keep working. Names a fix only *uses* are left alone.
+    """
+    claimed = _module_level_names(original_content)
+    # name -> the exact line(s) defining it, so an identical duplicate (two fixes
+    # both adding `logger = logging.getLogger(__name__)`) is left alone.
+    def_lines: Dict[str, set] = {}
+    for m in _TOP_LEVEL_DEF_RE.finditer(original_content):
+        def_lines.setdefault(m.group(1) or m.group(2), set()).add(_def_line(original_content, m))
+    out: List[List[Dict[str, Any]]] = []
+    for action in actions:
+        entries = [dict(e) for e in (action.get("fix_code") or [])]
+        defined: Dict[str, set] = {}
+        replaced: set = set()
+        for e in entries:
+            pos = _fix_entry_position(original_content, e.get("original", ""))
+            if pos < 0:
+                continue
+            line_start = original_content.rfind("\n", 0, pos) + 1
+            if original_content[line_start:pos].strip() or original_content[line_start:line_start + 1] in (" ", "\t"):
+                continue  # edit inside an indented block — not a module-level definition
+            for m in _TOP_LEVEL_DEF_RE.finditer(e.get("replacement", "")):
+                defined.setdefault(m.group(1) or m.group(2), set()).add(_def_line(e.get("replacement", ""), m))
+            replaced |= {m.group(1) or m.group(2) for m in _TOP_LEVEL_DEF_RE.finditer(e.get("original", ""))}
+        rename: Dict[str, str] = {}
+        for name in sorted((set(defined) - replaced) & claimed):
+            if all(not l.startswith(("def ", "async def ", "class ")) for l in defined[name]):
+                if defined[name] <= def_lines.get(name, set()):
+                    continue  # the same assignment again — harmless
+            n = 2
+            while f"{name}_{n}" in claimed:
+                n += 1
+            rename[name] = f"{name}_{n}"
+        if rename:
+            pattern = re.compile(r"(?<![\w.])(" + "|".join(map(re.escape, rename)) + r")\b")
+            for e in entries:
+                e["replacement"] = pattern.sub(lambda m: rename[m.group(1)], e.get("replacement", ""))
+            logger.info(
+                "Renamed %s in fix for %r (%s) — another fix or the file already defines it",
+                ", ".join(f"{k} -> {v}" for k, v in rename.items()), filepath, action.get("control", ""),
+            )
+        for name, lines in defined.items():
+            def_lines.setdefault(rename.get(name, name), set()).update(lines)
+        claimed |= (set(defined) - set(rename)) | set(rename.values())
+        out.append(entries)
+    return out
+
+
+def _first_line(snippet: str, limit: int = 120) -> str:
+    """First non-blank line of *snippet*, stripped and cut to *limit* chars."""
+    line = next((l.strip() for l in snippet.splitlines() if l.strip()), "")
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _fix_entry_position(content: str, original: str) -> int:
+    """Where *original* starts in *content* (exact, then stripped, then by its
+    first line), or -1 when it can't be found — used only to order fixes."""
+    for needle in (original, original.strip(), _first_line(original, limit=10_000)):
+        if needle:
+            idx = content.find(needle)
+            if idx != -1:
+                return idx
+    return -1
+
+
 def apply_pipeline_fix_code_to_clone(
     remediation_actions: List[Dict[str, Any]],
     source_dir: str,
@@ -1874,36 +2680,187 @@ def apply_pipeline_fix_code_to_clone(
             failed_files.append(filepath)
             continue
 
-        content = original_content
-        patch_applied = False
-        for action in actions:
-            for fix_entry in (action.get("fix_code") or []):
-                original = fix_entry.get("original") or ""
-                replacement = fix_entry.get("replacement", "")
-                if not original.strip():
+        # Only gate Python files that compiled before we touched them — a file
+        # that was already broken can't tell us whether a fix broke it.
+        check_python = (
+            rel_path.endswith(".py")
+            and validate_python_source(original_content, rel_path) is None
+        )
+        # Apply bottom-up: each entry is ordered by where its original snippet
+        # sits in the untouched file, last first, so a fix never shifts or
+        # rewrites code that a fix above it still has to find. Entries whose
+        # snippet can't be located go last, in their original order.
+        deduped = _dedupe_fix_definitions(original_content, actions, filepath) if check_python else [
+            list(a.get("fix_code") or []) for a in actions
+        ]
+        entries = [
+            (action, fix_entry)
+            for action, action_entries in zip(actions, deduped)
+            for fix_entry in action_entries
+            if (fix_entry.get("original") or "").strip()
+        ]
+        entries.sort(
+            key=lambda e: _fix_entry_position(original_content, e[1]["original"]),
+            reverse=True,
+        )
+        excluded: set = set()
+        for _round in range(len(actions) + 1):
+            content = original_content
+            applied: Dict[int, List[str]] = {}
+            for action, fix_entry in entries:
+                if id(action) in excluded:
                     continue
-                content, applied = _apply_fix_entry(content, original, replacement)
-                if applied:
-                    patch_applied = True
-                else:
-                    logger.debug(
-                        "Patch not applied for %r — original snippet (%d chars) not found",
-                        filepath, len(original),
-                    )
+                original = fix_entry["original"]
+                replacement = fix_entry.get("replacement", "")
+                patched, reason = _apply_fix_entry_checked(
+                    content, original, replacement, rel_path, check_python,
+                )
+                if patched is None:
+                    if _round == 0 and reason == "not found":
+                        logger.info(
+                            "Patch not applied for %r (%s) — original snippet (%d chars) not found; "
+                            "it starts with: %r",
+                            filepath, action.get("control", ""), len(original), _first_line(original),
+                        )
+                    elif _round == 0:
+                        logger.warning(
+                            "Rejected fix for %r (%s) — it breaks the file: %s",
+                            filepath, action.get("control", ""), reason,
+                        )
+                    continue
+                content = patched
+                applied.setdefault(id(action), []).append(replacement)
 
-        if patch_applied and content != original_content:
+            undefined: List[str] = []
+            if applied and content != original_content and check_python:
+                content, undefined = _add_missing_stdlib_imports(content, original_content)
+            if not undefined:
+                break
+            # Drop only the fixes that use the undefined names — typically a helper
+            # whose defining entry was lost to a conflicting edit — and keep the rest.
+            culprits = [
+                a for a in actions
+                if id(a) in applied and _uses_any("\n".join(applied[id(a)]), undefined)
+            ]
+            if not culprits:
+                logger.warning(
+                    "Rejected all fixes for %r — they use undefined name(s): %s",
+                    filepath, ", ".join(undefined),
+                )
+                applied = {}
+                break
+            for a in culprits:
+                logger.warning(
+                    "Dropped fix for %r (%s) — it uses undefined name(s): %s",
+                    filepath, a.get("control", ""),
+                    ", ".join(_uses_any("\n".join(applied[id(a)]), undefined)),
+                )
+                excluded.add(id(a))
+        applied_actions = [a for a in actions if id(a) in applied]
+
+        if applied_actions and content != original_content:
             validated_fixes[rel_path] = content
-            for action in actions:
+            for action in applied_actions:
                 fix_table_rows.append({
                     "policy": action.get("control", ""),
                     "description": (action.get("instruction") or "")[:200],
                     "file": filepath,
                 })
         else:
-            logger.warning("No patch applied for %r — snippets did not match file content", filepath)
+            logger.warning("No valid patch applied for %r — needs a manual fix", filepath)
             failed_files.append(filepath)
 
     return validated_fixes, failed_files, fix_table_rows
+
+
+# ===========================================================================
+# LLM remediation — report / PR sections
+# ===========================================================================
+
+def _md_cell(text: Any, limit: int = 300) -> str:
+    t = " ".join(str(text or "").split())
+    if len(t) > limit:
+        t = t[: limit - 1].rstrip() + "…"
+    return t.replace("|", "\\|")
+
+
+def _pr_remediation_details(fix_table: List[Dict[str, str]], limit_chars: int) -> str:
+    """Compact per-file remediation list for the PR body (policy + what was changed)."""
+    if not fix_table:
+        return ""
+    lines = ["### Remediation details (LLM)", "", "| File | Policy | Change |", "|------|--------|--------|"]
+    for r in fix_table:
+        lines.append(
+            f"| `{_md_cell(r.get('file'), 100)}` | {_md_cell(r.get('policy'), 100)} | "
+            f"{_md_cell(r.get('description'), 200)} |"
+        )
+    text = "\n".join(lines)
+    if len(text) > limit_chars:
+        text = text[:limit_chars].rsplit("\n", 1)[0] + "\n\n*… more rows in the scan report.*"
+    return text
+
+
+
+_PR_REPORT_SECTIONS = (
+    "### SECTION 1: AIBOM Discovery",
+    "### SECTION 2: Policy Violations",
+    "### SECTION 3: Controls Enforced",
+)
+
+
+def _build_fix_pr_body(
+    branch: str,
+    sha_short: str,
+    committed: List[str],
+    failed_files: Optional[List[str]],
+    fix_table: List[Dict[str, str]],
+    report: str,
+    limit: int,
+    report_note: str = "",
+) -> str:
+    """Remediation PR description: SECTION 1 (AIBOM), SECTION 2 (Policy Violations),
+    SECTION 3 (Controls Enforced) from the scan report, then the remediation changes.
+
+    The remediation part is sized first so a long report is what gets truncated, never
+    the list of changed files.
+    """
+    head = "\n".join([
+        "## Lineaje AI Policy Scan",
+        "",
+        f"Scan of `{branch}` at `{sha_short}`. The remediation changes below are "
+        "LLM-suggested fixes for review — merge only what you accept.",
+    ])
+    failed = failed_files or []
+    remediation = "\n".join([
+        "## Remediation changes",
+        "",
+        f"### Files remediated ({len(committed)})",
+        "",
+        "\n".join(f"- `{f}`" for f in committed),
+        "",
+        f"### Files without fixes ({len(failed)})",
+        "",
+        "\n".join(f"- `{f}`" for f in failed) or "_None_",
+    ])
+    details = _pr_remediation_details(fix_table, limit // 3)
+    if details:
+        remediation += "\n\n" + details
+
+    sections = _split_report_sections(report or "")
+    blocks = [f"{h}\n{sections[h].strip()}" for h in _PR_REPORT_SECTIONS if sections.get(h, "").strip()]
+    report_md = "\n\n".join(blocks) if blocks else (report or "").strip()
+
+    sep = "\n\n---\n\n"
+    note = f"\n\n{report_note}" if report_note else ""
+    budget = limit - len(head) - len(remediation) - 2 * len(sep) - len(note)
+    parts = [head]
+    if report_md and budget > 500:
+        if len(report_md) > budget:
+            cut = "\n\n*… report truncated — full report in the workflow run summary.*"
+            report_md = report_md[: budget - len(cut)].rsplit("\n", 1)[0] + cut
+        parts.append(report_md + note)
+    parts.append(remediation)
+    return sep.join(parts)[:limit]
 
 
 # ===========================================================================
@@ -2020,7 +2977,7 @@ def _create_github_fix_pr(
     report: str = "",
     failed_files: Optional[List[str]] = None,
 ) -> Tuple[Optional[int], str]:
-    """Commit guardrail-stub fixes to a branch and open a PR on github.com."""
+    """Commit LLM remediation (fix_code) patches to a branch and open a PR on github.com."""
     if not validated_fixes:
         return None, ""
 
@@ -2062,7 +3019,7 @@ def _create_github_fix_pr(
         except Exception:
             pass
         policies = ", ".join({r["policy"] for r in fix_table if r.get("file") == filepath}) or "policy violations"
-        message = f"fix({filepath}): remediate {policies} [unifai-ado-scan]"
+        message = f"fix({filepath}): remediate {policies} [unifai-ghp-scan]"
         try:
             scm.commit_file(repo, remediation_branch, filepath, content.encode("utf-8"), message, sha=blob_sha)
             committed.append(filepath)
@@ -2075,28 +3032,9 @@ def _create_github_fix_pr(
         return None, remediation_branch
 
     title = f"[unifai-bot] fix: AI policy remediation for {branch}@{sha_short}"
-    files_list = "\n".join(f"- `{f}`" for f in committed)
-    failed_list = ("\n".join(f"- `{f}`" for f in (failed_files or []))) or "_None_"
-    pr_body = "\n".join([
-        "## UniFAI AI Policy Remediation",
-        "",
-        f"Automated fixes for policy violations detected in `{branch}` at `{sha_short}`.",
-        "",
-        f"### Files remediated ({len(committed)})",
-        "",
-        files_list,
-        "",
-        f"### Files without fixes ({len(failed_files or [])})",
-        "",
-        failed_list,
-    ])
-    if report:
-        heading = "\n\n---\n\n### Scan report\n\n"
-        budget = GITHUB_PR_BODY_SAFE_LIMIT - len(pr_body) - len(heading)
-        report_text = report.strip()
-        if budget > 500:
-            pr_body += heading + (report_text[:budget].rstrip() if len(report_text) > budget else report_text)
-    pr_body = pr_body[:GITHUB_PR_BODY_SAFE_LIMIT]
+    pr_body = _build_fix_pr_body(
+        branch, sha_short, committed, failed_files, fix_table, report, GITHUB_PR_BODY_SAFE_LIMIT,
+    )
 
     try:
         pr_number = scm.create_pull_request(repo, title, remediation_branch, branch, pr_body)
@@ -2175,30 +3113,10 @@ def _create_fix_pr(
 
     title = f"[unifai-bot] fix: AI policy remediation for {branch}@{sha_short}"
 
-    files_list = "\n".join(f"- `{f}`" for f in committed)
-    failed_list = ("\n".join(f"- `{f}`" for f in (failed_files or []))) or "_None_"
-    pr_body = "\n".join([
-        "## UniFAI AI Policy Remediation",
-        "",
-        f"Automated fixes for policy violations detected in `{branch}` at `{sha_short}`.",
-        "",
-        f"### Files remediated ({len(committed)})",
-        "",
-        files_list,
-        "",
-        f"### Files without fixes ({len(failed_files or [])})",
-        "",
-        failed_list,
-    ])
-    if report:
-        heading = "\n\n---\n\n### Scan report\n\n"
-        tail = "\n\n---\n\n*Full scan report: see the `unifai-report` artifact on the pipeline run.*"
-        budget = AZURE_PR_DESCRIPTION_LIMIT - len(pr_body) - len(heading) - len(tail)
-        report_text = report.strip()
-        if budget > 500:
-            pr_body += heading + (report_text[:budget].rstrip() if len(report_text) > budget else report_text)
-        pr_body += tail
-    pr_body = pr_body[:AZURE_PR_DESCRIPTION_LIMIT]
+    pr_body = _build_fix_pr_body(
+        branch, sha_short, committed, failed_files, fix_table, report, AZURE_PR_DESCRIPTION_LIMIT,
+        report_note="*Full scan report: see the `unifai-report` artifact on the pipeline run.*",
+    )
 
     try:
         pr_id = scm.create_pull_request(title, remediation_branch, branch, pr_body)
@@ -2296,17 +3214,17 @@ def _execute_scan(args: argparse.Namespace) -> int:
         return 0
 
     batch_size = _batch_size(len(file_list))
-    batches = [file_list[i: i + batch_size] for i in range(0, len(file_list), batch_size)]
+    batches, code_files, manifest_files = pin_manifests_to_first_batch(file_list, batch_size)
     logger.info(
-        "Files: %d total → %d batch(es) of ≤%d",
-        len(file_list), len(batches), batch_size,
+        "Files: %d total (%d code, %d manifests in batch 1) → %d batch(es)",
+        len(file_list), len(code_files), len(manifest_files), len(batches),
     )
 
     # Step 2: MCP scan
     with tempfile.TemporaryDirectory(prefix="ado-repo-scan-") as temp_dir:
         (
             all_violations, all_remediation_actions, all_reports, all_aibom,
-            failed_batches_count, failure_details, all_stub_insertions,
+            failed_batches_count, failure_details, all_stub_insertions, uploaded,
         ) = parallel_batch_scan(
             batches=batches,
             source_dir=source_path,
@@ -2317,6 +3235,7 @@ def _execute_scan(args: argparse.Namespace) -> int:
             run_id=run_id,
             server_url=server_url,
             bearer_getter=bearer_getter,
+            manifest_files=manifest_files or None,
         )
 
     elapsed = time.perf_counter() - scan_start
@@ -2347,9 +3266,9 @@ def _execute_scan(args: argparse.Namespace) -> int:
     if failed_batches_count:
         status = "error"
 
-    # Step 3: apply MCP stub_insertions and open a remediation PR from them
-    # (remediation_actions/fix_code is always empty from the server, so it's
-    # not used here — mirrors gha_repo_scan.py's STEP 3).
+    # Step 3: apply the LLM remediation (remediation_actions[].fix_code) and open
+    # a remediation PR from it. Guardrail stubs, gr_stub_client.py and .env
+    # files from the server are never applied or committed by this script.
     remediation_pr_number: Optional[int] = None
     remediation_branch = ""
     remediation_pr_url = ""
@@ -2358,19 +3277,22 @@ def _execute_scan(args: argparse.Namespace) -> int:
     fix_table: List[Dict[str, str]] = []
 
     if all_stub_insertions:
-        logger.info("STEP 3: Applying %d MCP stub(s)", len(all_stub_insertions))
-        validated_fixes = apply_stub_insertions_to_clone(all_stub_insertions, source_path)
-        fix_table = [
-            {
-                "policy": ", ".join(
-                    {pd.get("policy_id", "") for pd in (s.get("policy_details") or []) if pd.get("policy_id")}
-                ) or "guardrail_stub",
-                "description": (s.get("description", "") or "")[:200],
-                "file": s.get("file", ""),
-            }
-            for s in all_stub_insertions
-            if s.get("status") == "detected" and (s.get("file") or "") in validated_fixes
-        ]
+        logger.info(
+            "STEP 3: ignoring %d guardrail stub insertion(s) — this script applies LLM remediation only",
+            len(all_stub_insertions),
+        )
+    rem_actions = [a for a in all_remediation_actions if not _is_stub_or_env_file(a.get("file") or "")]
+    if rem_actions:
+        logger.info("STEP 3: applying LLM remediation (%d action(s))", len(rem_actions))
+        validated_fixes, failed_rem_files, fix_table = apply_pipeline_fix_code_to_clone(
+            rem_actions, source_path, file_list,
+        )
+        logger.info(
+            "STEP 3: %d file(s) patched, %d file(s) need a manual fix",
+            len(validated_fixes), len(failed_rem_files),
+        )
+    else:
+        logger.info("STEP 3: server returned no LLM remediation (remediation_actions is empty)")
 
     # GitHub token takes precedence over Azure DevOps config.
     github_token = _normalize_token(
@@ -2394,14 +3316,6 @@ def _execute_scan(args: argparse.Namespace) -> int:
             ("SYSTEM_TEAMPROJECT / --project", project),
         ] if not v]
 
-    if should_create_pr:
-        _ensure_env_example_in_validated_fixes(
-            validated_fixes,
-            source_path,
-            refresh_token=os.environ.get("LINEAJE_PAT_TOKEN", "") or os.environ.get("LINEAJE_REFRESH_TOKEN", ""),
-            server_url=server_url,
-        )
-
     if should_create_pr and use_github:
         if validated_fixes:
             logger.info("Creating remediation PR on GitHub (%d file(s))", len(validated_fixes))
@@ -2419,7 +3333,7 @@ def _execute_scan(args: argparse.Namespace) -> int:
             except Exception as exc:
                 logger.error("Remediation PR failed: %s", exc)
         else:
-            logger.info("No guardrail stubs to commit for a remediation PR")
+            logger.info("No LLM remediation patches to commit for a remediation PR")
     elif should_create_pr and missing_scm:
         logger.info("Skipping remediation PR — missing %s", ", ".join(missing_scm))
     elif should_create_pr and validated_fixes:
@@ -2443,7 +3357,7 @@ def _execute_scan(args: argparse.Namespace) -> int:
         except Exception as exc:
             logger.error("Remediation PR failed: %s", exc)
     elif should_create_pr:
-        logger.info("No guardrail stubs to commit for a remediation PR")
+        logger.info("No LLM remediation patches to commit for a remediation PR")
 
     output = build_json_output(
         status=status, repo=repo, branch=branch, head_sha=head_sha,
@@ -2455,6 +3369,10 @@ def _execute_scan(args: argparse.Namespace) -> int:
         remediation_pr_url=remediation_pr_url,
         failed_remediation_files=failed_rem_files,
         scan_errors=failure_details,
+        remediation_actions=all_remediation_actions,
+        uploaded_entities=uploaded["entities"],
+        uploaded_findings=uploaded["findings"],
+        source_archive_s3_uploaded=uploaded["source_archive_s3_uploaded"],
     )
     print_human_output(output)
     return 0
