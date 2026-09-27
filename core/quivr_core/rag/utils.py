@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any, Dict, List, Tuple, no_type_check
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -20,7 +21,99 @@ from quivr_core.rag.prompts import TemplatePromptName, custom_prompts
 # This should be used for serialization/deseriallization later
 
 
+import re
+
 logger = logging.getLogger("quivr_core")
+
+
+def sanitize_input_2(text: str) -> str:
+    """Strip common prompt-injection patterns from user-supplied text."""
+    import re
+    # Remove attempts to override system instructions
+    patterns = [
+        r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        r"(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        r"(?i)forget\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        r"(?i)you\s+are\s+now\s+(?:a|an|the)\s+",
+        r"(?i)act\s+as\s+(?:a|an|the)\s+",
+        r"(?i)new\s+instructions?\s*:",
+        r"(?i)system\s*:\s*",
+        r"(?i)<\s*/?\s*(?:system|instructions?|prompt)\s*>",
+    ]
+    sanitized = text
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "[FILTERED]", sanitized)
+    return sanitized
+
+# Known prompt injection patterns: role overrides, delimiter abuse, instruction keywords
+_INJECTION_PATTERNS = re.compile(
+    r"(\bsystem\b|\buser\b|\bassistant\b|\bhuman\b)\s*:\s*"
+    r"|<\s*(system|user|assistant|human|instruction|prompt)\s*>"
+    r"|\[\s*(INST|SYS|SYSTEM|USER|ASSISTANT)\s*\]"
+    r"|###\s*(Instruction|System|Human|Assistant)"
+    r"|ignore (previous|above|prior|all) instructions?"
+    r"|you are now|pretend (you are|to be)|act as (a |an )?(different|new)?",
+    re.IGNORECASE,
+)
+
+
+def sanitize_input(value: str, field_name: str = "input") -> str:
+    """Sanitize user-supplied or config-supplied string values before prompt inclusion.
+
+    Raises ValueError and logs a warning if injection patterns are detected.
+    Returns the original value if it passes validation.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str for {field_name}, got {type(value).__name__}")
+    if _INJECTION_PATTERNS.search(value):
+        logger.warning(
+            "Potential prompt injection detected in %s: %r — request blocked.",
+            field_name,
+            value[:200],
+        )
+        raise ValueError(
+            f"Input for '{field_name}' contains disallowed patterns and was rejected."
+        )
+    return value
+
+# Patterns that indicate dynamic code execution primitives in LLM output
+_DANGEROUS_PATTERNS = [
+    re.compile(r'\beval\s*\(', re.IGNORECASE),
+    re.compile(r'\bexec\s*\(', re.IGNORECASE),
+    re.compile(r'\bexecfile\s*\(', re.IGNORECASE),
+    re.compile(r'\bcompile\s*\(', re.IGNORECASE),
+    re.compile(r'\b__import__\s*\(', re.IGNORECASE),
+    re.compile(r'subprocess\.(?:call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True', re.IGNORECASE | re.DOTALL),
+    re.compile(r'\bos\.system\s*\(', re.IGNORECASE),
+    re.compile(r'\bos\.popen\s*\(', re.IGNORECASE),
+    re.compile(r'\bcommands\.getoutput\s*\(', re.IGNORECASE),
+    # JavaScript / bash eval
+    re.compile(r'\beval\s*`', re.IGNORECASE),
+    re.compile(r'\$\(\s*eval\b', re.IGNORECASE),
+]
+
+
+def sanitize_llm_output(text: str) -> str:
+    """Remove lines from LLM output that contain dynamic code execution primitives.
+
+    Args:
+        text: The raw text returned by the LLM.
+
+    Returns:
+        The sanitized text with dangerous lines removed.
+    """
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    sanitized_lines = []
+    for line in lines:
+        if any(pattern.search(line) for pattern in _DANGEROUS_PATTERNS):
+            logger.warning(
+                "Removed potentially dangerous line from LLM output: %r", line.rstrip()
+            )
+        else:
+            sanitized_lines.append(line)
+    return "".join(sanitized_lines)
 
 
 def model_supports_function_calling(model_name: str):
@@ -38,7 +131,10 @@ def format_history_to_openai_mesages(
     for human, ai in tuple_history:
         messages.append(HumanMessage(content=human))
         messages.append(AIMessage(content=ai))
-    messages.append(HumanMessage(content=question))
+    sanitized_question = sanitize_input(question, field_name="question")
+    # Wrap user data in XML delimiters to structurally separate it from system instructions
+    user_data_block = f"<user_input>\n{sanitized_question}\n</user_input>"
+    messages.append(HumanMessage(content=user_data_block))
     return messages
 
 
@@ -127,8 +223,8 @@ def parse_chunk_response(
     tool_calls = rolling_msg.tool_calls
 
     if not supports_func_calling or not tool_calls:
-        new_content = raw_chunk.content  # Just the new chunk's content
-        full_content = rolling_msg.content  # The full accumulated content
+        new_content = sanitize_llm_output(raw_chunk.content)  # Just the new chunk's content
+        full_content = sanitize_llm_output(rolling_msg.content)  # The full accumulated content
         return rolling_msg, new_content, full_content
 
     current_answers = get_answers_from_tool_calls(tool_calls)
@@ -136,6 +232,7 @@ def parse_chunk_response(
     if not full_answer:
         full_answer = previous_content
 
+    full_answer = sanitize_llm_output(full_answer)
     new_content = full_answer[len(previous_content) :]
 
     return rolling_msg, new_content, full_answer
@@ -147,7 +244,7 @@ def get_answers_from_tool_calls(tool_calls):
         if tool_call.get("name") == "cited_answer":
             args = tool_call.get("args", {})
             if isinstance(args, dict):
-                answers.append(args.get("answer", ""))
+                answers.append(sanitize_llm_output(args.get("answer", "")))
             else:
                 logger.warning(f"Expected dict for tool_call args, got {type(args)}")
     return answers
@@ -177,11 +274,11 @@ def parse_response(raw_response: RawRAGResponse, model_name: str) -> ParsedRAGRe
                 if "followup_questions" in args:
                     all_followup_questions.extend(args["followup_questions"])
                 if "answer" in args:
-                    answers.append(args["answer"])
+                    answers.append(sanitize_llm_output(args["answer"]))
         metadata.citations = all_citations
         metadata.followup_questions = all_followup_questions
     else:
-        answers.append(raw_response["answer"].content)
+        answers.append(sanitize_llm_output(raw_response["answer"].content))
 
     answer_str = "\n".join(answers)
     parsed_response = ParsedRAGResponse(answer=answer_str, metadata=metadata)
@@ -214,13 +311,17 @@ def format_file_list(
 def collect_tools(workflow_config: WorkflowConfig):
     validated_tools = "Available tools which can be activated:\n"
     for i, tool in enumerate(workflow_config.validated_tools):
-        validated_tools += f"Tool {i+1} name: {tool.name}\n"
-        validated_tools += f"Tool {i+1} description: {tool.description}\n\n"
+        safe_name = sanitize_input(str(tool.name), field_name=f"validated_tool[{i}].name")
+        safe_desc = sanitize_input(str(tool.description), field_name=f"validated_tool[{i}].description")
+        validated_tools += "Tool " + str(i + 1) + " name: " + safe_name + "\n"
+        validated_tools += "Tool " + str(i + 1) + " description: " + safe_desc + "\n\n"
 
     activated_tools = "Activated tools which can be deactivated:\n"
     for i, tool in enumerate(workflow_config.activated_tools):
-        activated_tools += f"Tool {i+1} name: {tool.name}\n"
-        activated_tools += f"Tool {i+1} description: {tool.description}\n\n"
+        safe_name = sanitize_input(str(tool.name), field_name=f"activated_tool[{i}].name")
+        safe_desc = sanitize_input(str(tool.description), field_name=f"activated_tool[{i}].description")
+        activated_tools += "Tool " + str(i + 1) + " name: " + safe_name + "\n"
+        activated_tools += "Tool " + str(i + 1) + " description: " + safe_desc + "\n\n"
 
     return validated_tools, activated_tools
 
