@@ -17,7 +17,7 @@ def test_llm_endpoint_from_config_default():
         llm = LLMEndpoint.from_config(LLMEndpointConfig())
 
     # Working default
-    config = LLMEndpointConfig(llm_api_key="test")
+    config = LLMEndpointConfig(model="gpt-4o", llm_api_key="test")
     llm = LLMEndpoint.from_config(config=config)
 
     assert llm.supports_func_calling()
@@ -30,7 +30,7 @@ def test_llm_endpoint_from_config():
     from langchain_openai import ChatOpenAI
 
     config = LLMEndpointConfig(
-        model="llama2", llm_api_key="test", llm_base_url="http://localhost:8441"
+        model="gpt-4o", llm_api_key="test", llm_base_url="http://localhost:8441"
     )
     llm = LLMEndpoint.from_config(config)
 
@@ -42,7 +42,7 @@ def test_llm_endpoint_from_config():
 def test_llm_endpoint_constructor():
     llm_endpoint = FakeListChatModel(responses=[])
     llm_endpoint = LLMEndpoint(
-        llm=llm_endpoint, llm_config=LLMEndpointConfig(model="test")
+        llm=llm_endpoint, llm_config=LLMEndpointConfig(model="gpt-4o")
     )
 
     assert not llm_endpoint.supports_func_calling()
