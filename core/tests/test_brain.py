@@ -1,3 +1,4 @@
+import re
 from dataclasses import asdict
 from uuid import uuid4
 
@@ -8,6 +9,34 @@ from quivr_core.brain import Brain
 from quivr_core.rag.entities.chat import ChatHistory
 from quivr_core.llm import LLMEndpoint
 from quivr_core.storage.local_storage import TransparentStorage
+
+
+_INJECTION_PATTERNS = re.compile(
+    r"(ignore\s+(previous|above|all)\s+instructions"
+    r"|you\s+are\s+now"
+    r"|disregard\s+(all\s+)?(previous\s+)?instructions"
+    r"|system\s*:\s*"
+    r"|<\s*system\s*>"
+    r"|\[\s*system\s*\]"
+    r"|act\s+as\s+(if\s+you\s+are|a\s+)"
+    r"|forget\s+(all\s+)?(previous\s+)?instructions"
+    r"|new\s+instructions\s*:"
+    r"|override\s+(previous\s+)?instructions)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_input(text: str) -> str:
+    """Guardrail: detect and block prompt injection attempts in user-supplied text."""
+    if not isinstance(text, str):
+        raise TypeError(f"Expected str, got {type(text).__name__}")
+    if _INJECTION_PATTERNS.search(text):
+        raise ValueError(
+            "Prompt injection detected in user input. Request blocked."
+        )
+    # Strip null bytes and other control characters that could be used for injection
+    sanitized = text.replace("\x00", "").strip()
+    return sanitized
 
 
 @pytest.mark.base
@@ -83,7 +112,7 @@ async def test_brain_search(
     )
 
     k = 2
-    result = await brain.asearch("content_1", n_results=k)
+    result = await brain.asearch(sanitize_input("content_1"), n_results=k)
 
     assert len(result) == k
     assert result[0].chunk == chunk1
@@ -104,8 +133,8 @@ async def test_brain_get_history(
         vector_db=mem_vector_store,
     )
 
-    await brain.aask("question")
-    await brain.aask("question")
+    await brain.aask(sanitize_input("question"))
+    await brain.aask(sanitize_input("question"))
 
     assert len(brain.default_chat) == 4
 
@@ -120,7 +149,7 @@ async def test_brain_ask_streaming(
     )
 
     response = ""
-    async for chunk in brain.ask_streaming("question"):
+    async for chunk in brain.ask_streaming(sanitize_input("question")):
         response += chunk.answer
 
     assert response == answers[1]
