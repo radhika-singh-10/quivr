@@ -16,7 +16,64 @@ from typing import (
 )
 from uuid import UUID, uuid4
 
+import logging
+import re
 import openai
+
+# Model card / technical documentation for the OpenAI GPAI model used via LLMEndpoint.
+# See _ai_iac_024_MODEL_CARD_URL for the official reference.
+_ai_iac_024_MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact model card URL before deployment
+
+_ai_app_sec_067_logger = logging.getLogger(__name__)
+
+# Known prompt injection patterns to detect and block
+_ai_app_sec_067_INJECTION_PATTERNS = re.compile(
+    r"(?i)(\bignore\s+(all\s+)?(previous|prior|above)\b"
+    r"|\bsystem\s*:\s*"
+    r"|\buser\s*:\s*"
+    r"|\bassistant\s*:\s*"
+    r"|\b(you\s+are\s+now|act\s+as|pretend\s+to\s+be|your\s+new\s+role)\b"
+    r"|\b(disregard|forget|override)\s+(your\s+)?(instructions?|rules?|guidelines?)\b"
+    r"|<\s*/?\s*(system|user|assistant|prompt|instruction)\s*>"
+    r"|\[\s*(system|user|assistant|inst|INST)\s*\])"
+)
+
+
+def _ai_app_sec_067_sanitize_input(value: str, field_name: str = "input") -> str:
+    """Sanitize a user-supplied string before embedding it in an LLM prompt.
+
+    Detects known prompt-injection patterns, logs a warning and raises a
+    ValueError to block the request.  Clean values are wrapped in XML-style
+    structural delimiters so the model can distinguish user data from
+    system instructions.
+
+    Args:
+        value: The raw user-supplied string.
+        field_name: A label used in log messages to identify the field.
+
+    Returns:
+        The sanitized value wrapped in ``<user_data>`` delimiters.
+
+    Raises:
+        ValueError: When a prompt-injection pattern is detected.
+    """
+    if not isinstance(value, str):
+        value = str(value)
+
+    if _ai_app_sec_067_INJECTION_PATTERNS.search(value):
+        _ai_app_sec_067_logger.warning(
+            "Prompt injection attempt detected in field '%s': "
+            "input length=%d, hash=%s",
+            field_name,
+            len(value),
+            hash(value),
+        )
+        raise ValueError(
+            f"Input rejected: prompt injection pattern detected in field '{field_name}'."
+        )
+
+    # Wrap in structural delimiters to separate user data from instructions
+    return f"<user_data>\n{value}\n</user_data>"
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_cohere import CohereRerank
 from langchain_community.document_compressors import JinaRerank
@@ -33,7 +90,7 @@ from langgraph.graph.message import add_messages
 from langgraph.types import Send
 from pydantic import BaseModel, Field
 
-from quivr_core.llm import LLMEndpoint
+from quivr_core.llm import LLMEndpoint  # GPAI integration — model card: _ai_iac_024_MODEL_CARD_URL
 from quivr_core.llm_tools.llm_tools import LLMToolFactory
 from quivr_core.rag.entities.chat import ChatHistory
 from quivr_core.rag.entities.config import DefaultRerankers, NodeConfig, RetrievalConfig
@@ -55,6 +112,44 @@ from quivr_core.rag.utils import (
 )
 
 logger = logging.getLogger("quivr_core")
+
+# Disapproved model identifiers per organization registry
+_ai_app_sec_006_DISAPPROVED_PATTERNS = [
+    "deepseekr1distillllama70b",
+    "deepseekr1",
+    "deepseekreasoner",
+    "deepseekrchat",
+    "deepseek",
+    "customllmclient",
+    "openrouter",
+    "usdeepseekr1v10",
+]
+
+
+def _ai_app_sec_006_normalize(name: str) -> str:
+    """Normalize a model name for comparison by lowercasing and removing separators."""
+    import re
+    return re.sub(r"[\s\-_\.:\"']", "", name).lower()
+
+
+def _ai_app_sec_006_check_model(llm_endpoint: "LLMEndpoint") -> None:
+    """Raise ValueError if the LLM endpoint uses a disapproved model."""
+    try:
+        model_name = (
+            getattr(llm_endpoint._llm, "model_name", None)
+            or getattr(llm_endpoint._llm, "model", None)
+            or ""
+        )
+    except Exception:
+        model_name = ""
+    normalized = _ai_app_sec_006_normalize(str(model_name))
+    for pattern in _ai_app_sec_006_DISAPPROVED_PATTERNS:
+        if pattern in normalized:
+            raise ValueError(
+                f"Model '{model_name}' is not approved for use per the organization's "
+                f"model registry. Disapproved model matched pattern: '{pattern}'."
+            )
+
 
 langfuse_service = LangfuseService()
 langfuse_handler = langfuse_service.get_handler()
@@ -330,6 +425,7 @@ class QuivrQARAGLangGraph:
 
         response: SplittedInput
 
+        _ai_app_sec_006_check_model(self.llm_endpoint)
         try:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 SplittedInput, method="json_schema"
@@ -1175,6 +1271,7 @@ class QuivrQARAGLangGraph:
     async def ainvoke_structured_output(
         self, prompt: str, output_class: Type[BaseModel]
     ) -> Any:
+        _ai_app_sec_006_check_model(self.llm_endpoint)
         try:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 output_class, method="json_schema"
@@ -1187,6 +1284,7 @@ class QuivrQARAGLangGraph:
     def invoke_structured_output(
         self, prompt: str, output_class: Type[BaseModel]
     ) -> Any:
+        _ai_app_sec_006_check_model(self.llm_endpoint)
         try:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 output_class, method="json_schema"
@@ -1214,12 +1312,17 @@ class QuivrQARAGLangGraph:
         prompt = self.retrieval_config.prompt
         # available_tools, _ = collect_tools(self.retrieval_config.workflow_config)
 
+        sanitized_task = _ai_app_sec_067_sanitize_input(user_task, field_name="task")
+        sanitized_files = _ai_app_sec_067_sanitize_input(
+            files if files else "None", field_name="files"
+        )
+
         return {
             "context": combine_documents(docs) if docs else "None",
-            "task": user_task,
+            "task": sanitized_task,
             "rephrased_task": state["tasks"].definitions if state["tasks"] else "None",
             "custom_instructions": prompt if prompt else "None",
-            "files": files if files else "None",
+            "files": sanitized_files,
             "chat_history": state["chat_history"].to_list(),
             # "reasoning": state["reasoning"] if "reasoning" in state else "None",
             # "tools": available_tools,
