@@ -1,5 +1,9 @@
 from uuid import uuid4
 
+# Model card / technical documentation for the model used in these tests.
+# Update MODEL_CARD_URL to point to the approved model's documentation before deploying to production.
+MODEL_CARD_URL = ""  # TODO: replace with the approved model card URL before deployment
+
 import pytest
 from langchain_core.messages.ai import AIMessageChunk
 from langchain_core.messages.tool import ToolCall
@@ -11,7 +15,7 @@ from quivr_core.rag.utils import (
 
 
 def test_model_supports_function_calling():
-    assert model_supports_function_calling("gpt-4") is True
+    assert model_supports_function_calling("claude-3-5-sonnet-20240620") is True
     assert model_supports_function_calling("ollama3") is False
 
 
