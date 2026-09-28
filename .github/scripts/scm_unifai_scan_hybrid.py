@@ -24,7 +24,7 @@ the caller's job — the workflow does it before invoking this script.
 
 Usage::
 
-    python scm_unifai_scan.py --source-path . --create-fix-pr
+    python scm_unifai_scan_hybrid.py --source-path . --create-fix-pr
 
 Output:
 
@@ -84,7 +84,7 @@ logger = logging.getLogger("gha_repo_scan")
 # Constants
 # ===========================================================================
 
-MCP_SERVER_URL = "https://172.206.26.109/mcp"#"https://172.206.26.109/mcp"  # Put in your VM IP Address here
+MCP_SERVER_URL = "https://172.174.131.13/mcp"#"https://172.206.26.109/mcp"  # Put in your VM IP Address here
 
 
 def _mcp_http_client_with_extra_ca(headers=None, timeout=None, auth=None):
@@ -231,8 +231,24 @@ BINARY_EXTENSIONS = frozenset({
     ".dll", ".so", ".dylib", ".class", ".jar", ".war", ".pyc", ".pyo", ".o",
     ".a", ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac", ".db", ".sqlite",
     ".sqlite3",
+    # The server prefilter skips these too (Tier 3); sending them only costs
+    # request body (4 MiB cap, 413).
+    ".epub", ".mobi", ".azw3", ".odt", ".ods", ".odp", ".odg", ".tif", ".tiff",
+    ".heic", ".avif", ".psd", ".mkv", ".webm", ".ogg", ".m4a", ".aac", ".xz",
+    ".tgz", ".zst", ".whl", ".egg", ".wasm", ".parquet", ".arrow", ".feather",
+    ".npy", ".npz", ".h5", ".hdf5", ".tfrecord", ".pkl", ".pickle", ".bin",
+    ".onnx", ".pt", ".pth", ".safetensors", ".gguf",
 })
 _ARCHIVE_EXCLUDE_DIR_GLOBS = (".venv-*", "venv-*")
+
+
+def _looks_binary(path: str) -> bool:
+    """True when the file's first 8 KiB contain a NUL byte (not source text)."""
+    try:
+        with open(path, "rb") as handle:
+            return b"\0" in handle.read(8192)
+    except OSError:
+        return False
 
 
 def is_lockfile_basename(name: str) -> bool:
@@ -672,6 +688,8 @@ def collect_repo_files(local_path: str, exclude: Optional[List[str]] = None) -> 
             if any(fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(fname, pattern)
                    for pattern in exclude_globs):
                 continue
+            if _looks_binary(os.path.join(root, fname)):
+                continue
             file_list.append(rel_path)
     return sorted(file_list)
 
@@ -975,6 +993,32 @@ def validate_python_source(new_content: str, abs_path: str) -> Optional[str]:
         return None
     except SyntaxError as exc:
         return str(exc)
+
+
+_COMPILE_GATED_EXTS = (".py", ".pyi")
+
+
+def _drop_uncompilable_fixes(validated_fixes: Dict[str, str]) -> List[str]:
+    """Final compile gate before the remediation PR (C-37 / LIN-35923).
+
+    Covers every file this script is about to commit (LLM ``fix_code``
+    patches and any server-provided whole-file content), so a corrupted file
+    is never committed. Runs validate_python_source on every .py / .pyi entry, removes
+    failures from ``validated_fixes`` in place and returns one
+    "<path> dropped: does not compile (<err>)" line per removed file.
+    Non-Python entries are left untouched. Compile-only by design: this
+    script runs standalone, so the pyflakes gate lives server-side."""
+    dropped: List[str] = []
+    for rel_path in list(validated_fixes):
+        if not rel_path.lower().endswith(_COMPILE_GATED_EXTS):
+            continue
+        err = validate_python_source(validated_fixes[rel_path], rel_path)
+        if err:
+            del validated_fixes[rel_path]
+            msg = f"{rel_path} dropped: does not compile ({err})"
+            logger.warning("Remediation gate: %s", msg)
+            dropped.append(msg)
+    return dropped
 
 
 def _norm_stub_relpath(path: str) -> str:
@@ -1823,9 +1867,19 @@ def parallel_batch_scan(
             try:
                 return [(label, _scan_leaf(label, files))]
             except BaseException as exc:
-                split = split_batch_keeping_manifests_whole(files) if _is_payload_too_large(exc) else None
-                if not split:
+                if not _is_payload_too_large(exc):
                     raise
+                split = split_batch_keeping_manifests_whole(files)
+                if not split:
+                    # Can't get smaller: skip these files, keep the rest of the batch.
+                    detail = (
+                        f"Batch {label}: {len(files)} file(s) not scanned, over the MCP "
+                        f"request size limit (413): {', '.join(files)}"
+                    )
+                    logger.warning("%s", detail)
+                    with lock:
+                        failure_details.append(detail)
+                    return []
                 first_half, second_half = split
                 logger.warning(
                     "Batch %s: 413 Request Entity Too Large (%d files) — "
@@ -1848,6 +1902,17 @@ def parallel_batch_scan(
         batch_report = mcp_result.get("report", "")
         batch_aibom = mcp_result.get("aibom", [])
         batch_stub_insertions = _stub_insertions_from_mcp_result(mcp_result)
+        # Errors the server hit while scanning this batch (a policy whose
+        # evaluation failed, a remediation that crashed, ...). The batch itself
+        # succeeded, so these don't count as a failed batch, but the results
+        # are incomplete and the caller has to be told.
+        batch_scan_errors = [
+            f"Batch {label}: {err}"
+            for err in (mcp_result.get("scan_errors") or [])
+            if str(err or "").strip()
+        ]
+        for err in batch_scan_errors:
+            logger.warning("%s", err)
         logger.info(
             "Batch %s/%d done: status=%s violations=%d aibom=%d stub_insertions=%d",
             label, len(batches), mcp_result.get("status", "unknown"),
@@ -1857,6 +1922,7 @@ def parallel_batch_scan(
             all_violations.extend(batch_violations)
             all_remediation_actions.extend(batch_actions)
             all_stub_insertions.extend(batch_stub_insertions)
+            failure_details.extend(batch_scan_errors)
             if batch_report:
                 all_reports.append(batch_report)
             uploaded["entities"].extend(mcp_result.get("uploaded_entities_json") or [])
@@ -2800,6 +2866,28 @@ def _pr_remediation_details(fix_table: List[Dict[str, str]], limit_chars: int) -
     return text
 
 
+def _pr_scan_errors_section(scan_errors: Optional[List[str]], limit_chars: int) -> str:
+    """Short "Scan errors" block for the PR body, never longer than limit_chars."""
+    errors = [e for e in (scan_errors or []) if str(e or "").strip()]
+    if not errors:
+        return ""
+    lines = [
+        f"### Scan errors ({len(errors)})",
+        "",
+        "The scan did not finish cleanly, so the findings and fixes below may be incomplete.",
+        "",
+    ]
+    used = sum(len(l) + 1 for l in lines)
+    for i, err in enumerate(errors):
+        line = f"- {_md_cell(err, 300)}"
+        more = f"*… {len(errors) - i} more in the scan output.*"
+        if used + len(line) + 1 + len(more) > limit_chars:
+            lines.append(more)
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
 
 _PR_REPORT_SECTIONS = (
     "### SECTION 1: AIBOM Discovery",
@@ -2817,12 +2905,14 @@ def _build_fix_pr_body(
     report: str,
     limit: int,
     report_note: str = "",
+    scan_errors: Optional[List[str]] = None,
 ) -> str:
     """Remediation PR description: SECTION 1 (AIBOM), SECTION 2 (Policy Violations),
     SECTION 3 (Controls Enforced) from the scan report, then the remediation changes.
 
     The remediation part is sized first so a long report is what gets truncated, never
-    the list of changed files.
+    the list of changed files. Scan errors, if any, go right under the heading, capped
+    at a sixth of the limit; with none the body is unchanged.
     """
     head = "\n".join([
         "## Lineaje AI Policy Scan",
@@ -2854,6 +2944,10 @@ def _build_fix_pr_body(
     note = f"\n\n{report_note}" if report_note else ""
     budget = limit - len(head) - len(remediation) - 2 * len(sep) - len(note)
     parts = [head]
+    errors_md = _pr_scan_errors_section(scan_errors, limit // 6)
+    if errors_md:
+        budget -= len(errors_md) + len(sep)
+        parts.append(errors_md)
     if report_md and budget > 500:
         if len(report_md) > budget:
             cut = "\n\n*… report truncated — full report in the workflow run summary.*"
@@ -2976,6 +3070,7 @@ def _create_github_fix_pr(
     *,
     report: str = "",
     failed_files: Optional[List[str]] = None,
+    scan_errors: Optional[List[str]] = None,
 ) -> Tuple[Optional[int], str]:
     """Commit LLM remediation (fix_code) patches to a branch and open a PR on github.com."""
     if not validated_fixes:
@@ -3034,6 +3129,7 @@ def _create_github_fix_pr(
     title = f"[unifai-bot] fix: AI policy remediation for {branch}@{sha_short}"
     pr_body = _build_fix_pr_body(
         branch, sha_short, committed, failed_files, fix_table, report, GITHUB_PR_BODY_SAFE_LIMIT,
+        scan_errors=scan_errors,
     )
 
     try:
@@ -3054,6 +3150,7 @@ def _create_fix_pr(
     *,
     report: str = "",
     failed_files: Optional[List[str]] = None,
+    scan_errors: Optional[List[str]] = None,
 ) -> Tuple[Optional[int], str]:
     """Commit fix_code patches to a remediation branch and open a PR."""
     if not validated_fixes:
@@ -3116,6 +3213,7 @@ def _create_fix_pr(
     pr_body = _build_fix_pr_body(
         branch, sha_short, committed, failed_files, fix_table, report, AZURE_PR_DESCRIPTION_LIMIT,
         report_note="*Full scan report: see the `unifai-report` artifact on the pipeline run.*",
+        scan_errors=scan_errors,
     )
 
     try:
@@ -3316,6 +3414,17 @@ def _execute_scan(args: argparse.Namespace) -> int:
             ("SYSTEM_TEAMPROJECT / --project", project),
         ] if not v]
 
+    # Last gate before either PR path: every patched Python file must still
+    # compile (C-37 / LIN-35923).
+    gated_paths = set(validated_fixes)
+    failed_rem_files.extend(_drop_uncompilable_fixes(validated_fixes))
+    gated_paths -= set(validated_fixes)
+    if gated_paths:
+        fix_table = [
+            row for row in fix_table
+            if _norm_stub_relpath(row.get("file") or "") not in gated_paths
+        ]
+
     if should_create_pr and use_github:
         if validated_fixes:
             logger.info("Creating remediation PR on GitHub (%d file(s))", len(validated_fixes))
@@ -3324,6 +3433,7 @@ def _execute_scan(args: argparse.Namespace) -> int:
                     github_token, repo, branch, head_sha,
                     validated_fixes, fix_table,
                     report=combined_report, failed_files=failed_rem_files,
+                    scan_errors=failure_details,
                 )
                 if remediation_pr_number:
                     remediation_pr_url = (
@@ -3349,6 +3459,7 @@ def _execute_scan(args: argparse.Namespace) -> int:
                 branch, head_sha,
                 validated_fixes, fix_table,
                 report=combined_report, failed_files=failed_rem_files,
+                scan_errors=failure_details,
             )
             if remediation_pr_number:
                 remediation_pr_url = AzureDevOpsClient(
