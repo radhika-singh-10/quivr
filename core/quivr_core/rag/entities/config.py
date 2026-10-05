@@ -20,6 +20,47 @@ logger = logging.getLogger("quivr_core")
 MIN_CONTEXT_TOKENS = 4096
 MIN_OUTPUT_TOKENS = 4096
 
+# Disapproved models per the organization model registry.
+_ai_app_sec_006_DISAPPROVED_PATTERNS: List[str] = [
+    "deepseekchat",
+    "deepseekr1",
+    "deepseekr1distillllama70b",
+    "deepseekreasoner",
+    "customllmclient",
+    "openrouter",
+    "usdeepseekr1v10",
+]
+
+
+def _ai_app_sec_006_normalize(name: str) -> str:
+    """Normalize a model identifier for registry comparison."""
+    return re.sub(r"[\s\-_\.:\u0000-\u001f]", "", name).lower()
+
+
+def _ai_app_sec_006_check_model_allowed(model: str) -> None:
+    """Raise ValueError if the model matches a disapproved registry entry."""
+    normalized = _ai_app_sec_006_normalize(model)
+    for pattern in _ai_app_sec_006_DISAPPROVED_PATTERNS:
+        if pattern in normalized:
+            raise ValueError(
+                f"Model '{model}' is disapproved by the organization model registry "
+                f"and cannot be used."
+            )
+
+
+# Model card / technical documentation URLs for every supported GPAI supplier.
+# Reviewers and auditors: verify these URLs before deployment.
+MODEL_CARD_URLS: dict = {
+    "openai": "https://openai.com/research/",        # GPT model cards & research
+    "azure": "https://openai.com/research/",         # Azure OpenAI uses OpenAI models
+    "anthropic": "https://www.anthropic.com/research",  # Claude model cards
+    "meta": "https://ai.meta.com/research/",         # LLaMA model cards
+    "mistral": "https://mistral.ai/technology/",     # Mistral model documentation
+    "groq": "https://ai.meta.com/research/",         # Groq hosts Meta/LLaMA models
+    "gemini": "https://ai.google.dev/gemini-api/docs",  # Gemini technical docs
+    "deepseek": "https://github.com/deepseek-ai/DeepSeek-R1",  # DeepSeek model card
+}
+
 
 def normalize_to_env_variable_name(name: str) -> str:
     # Replace any character that is not a letter, digit, or underscore with an underscore
@@ -84,6 +125,8 @@ class LLMConfig(QuivrBaseConfig):
 
 
 class LLMModelConfig:
+    # Model card / technical documentation references are in MODULE_CARD_URLS (see module level).
+    # Consult MODEL_CARD_URLS for the authoritative model card URL of each supplier before deployment.
     _model_defaults: Dict[DefaultModelSuppliers, Dict[str, LLMConfig]] = {
         DefaultModelSuppliers.OPENAI: {
             "gpt-4.1": LLMConfig(
@@ -308,6 +351,10 @@ class LLMModelConfig:
 class LLMEndpointConfig(QuivrBaseConfig):
     supplier: DefaultModelSuppliers = DefaultModelSuppliers.OPENAI
     model: str = "gpt-4o"
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        _ai_app_sec_006_check_model_allowed(self.model)
     tokenizer_hub: str | None = None
     llm_base_url: str | None = None
     env_variable_name: str | None = None
