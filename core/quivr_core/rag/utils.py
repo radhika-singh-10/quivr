@@ -20,7 +20,89 @@ from quivr_core.rag.prompts import TemplatePromptName, custom_prompts
 # This should be used for serialization/deseriallization later
 
 
+import re
+
 logger = logging.getLogger("quivr_core")
+
+import re
+
+_ai_app_sec_070_patterns: List[Tuple[re.Pattern, str]] = [
+    # instruction_override
+    (re.compile(r'ignore\s+previous\s+instructions', re.IGNORECASE), '<prompt_injection_removed: instruction_override>'),
+    (re.compile(r'forget\s+everything\s+above', re.IGNORECASE), '<prompt_injection_removed: instruction_override>'),
+    # role_hijack
+    (re.compile(r'you\s+are\s+now\s+DAN', re.IGNORECASE), '<prompt_injection_removed: role_hijack>'),
+    (re.compile(r'act\s+as\s+unrestricted', re.IGNORECASE), '<prompt_injection_removed: role_hijack>'),
+    # delimiter_escape
+    (re.compile(r'</?(system|tool|assistant|user)\s*>', re.IGNORECASE), '<prompt_injection_removed: delimiter_escape>'),
+    # encoded_payload: base64-looking blobs (16+ base64 chars)
+    (re.compile(r'(?:[A-Za-z0-9+/]{4}){4,}={0,2}'), '<prompt_injection_removed: encoded_payload>'),
+    # hidden_text: HTML comments
+    (re.compile(r'<!--.*?-->', re.DOTALL), '<prompt_injection_removed: hidden_text>'),
+    # hidden_text: zero-width characters
+    (re.compile(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]'), '<prompt_injection_removed: hidden_text>'),
+    # fake_system_message
+    (re.compile(r'\[\s*(system|tool|assistant)\s*\]', re.IGNORECASE), '<prompt_injection_removed: fake_system_message>'),
+    (re.compile(r'<\s*(system|tool)\s*>', re.IGNORECASE), '<prompt_injection_removed: fake_system_message>'),
+    # exfiltration_attempt
+    (re.compile(r'!\[.*?\]\(https?://[^)]+\)', re.IGNORECASE), '<prompt_injection_removed: exfiltration_attempt>'),
+    (re.compile(r'send\s+(this|the)\s+(data|prompt|context|system\s+prompt)\s+to\s+https?://', re.IGNORECASE), '<prompt_injection_removed: exfiltration_attempt>'),
+    (re.compile(r'leak\s+(the\s+)?system\s+prompt', re.IGNORECASE), '<prompt_injection_removed: exfiltration_attempt>'),
+    # jailbreak_attempt
+    (re.compile(r'\bDAN\b'), '<prompt_injection_removed: jailbreak_attempt>'),
+    (re.compile(r'developer\s+mode', re.IGNORECASE), '<prompt_injection_removed: jailbreak_attempt>'),
+    (re.compile(r'fictional\s+framing', re.IGNORECASE), '<prompt_injection_removed: jailbreak_attempt>'),
+    # command_injection
+    (re.compile(r'(?:^|\s)(?:rm\s+-rf|sudo\s+|chmod\s+|wget\s+|curl\s+.*\|\s*sh)', re.IGNORECASE), '<prompt_injection_removed: command_injection>'),
+    # context_poisoning
+    (re.compile(r'disregard\s+(all\s+)?prior\s+(context|instructions)', re.IGNORECASE), '<prompt_injection_removed: context_poisoning>'),
+    # indirect_injection
+    (re.compile(r'<!--\s*inject', re.IGNORECASE), '<prompt_injection_removed: indirect_injection>'),
+]
+
+
+def _ai_app_sec_070_sanitize(text: str) -> str:
+    """Neutralize prompt injection patterns in user-supplied text before sending to LLM."""
+    if not isinstance(text, str):
+        return text
+    for pattern, marker in _ai_app_sec_070_patterns:
+        text = pattern.sub(marker, text)
+    return text
+
+# Patterns for dynamic code execution primitives that must not appear in LLM output
+_ai_app_sec_029_patterns = [
+    re.compile(r'\beval\s*\(', re.IGNORECASE),           # Python/JS eval(
+    re.compile(r'\bexec\s*\(', re.IGNORECASE),           # Python exec(
+    re.compile(r'\bexecfile\s*\(', re.IGNORECASE),       # Python 2 execfile(
+    re.compile(r'\bcompile\s*\(.*\bexec\b', re.IGNORECASE),  # compile(..., 'exec')
+    re.compile(r'subprocess\.(?:call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True', re.IGNORECASE),  # subprocess shell=True
+    re.compile(r'\bos\.system\s*\(', re.IGNORECASE),    # os.system(
+    re.compile(r'\bos\.popen\s*\(', re.IGNORECASE),     # os.popen(
+    re.compile(r'\bcommands\.getoutput\s*\(', re.IGNORECASE),  # commands.getoutput(
+    re.compile(r'\$\(.*\)'),                              # bash $(...) command substitution
+    re.compile(r'`[^`]+`'),                               # bash backtick execution
+    re.compile(r'\beval\s+["\']', re.IGNORECASE),       # bash eval "..."
+    re.compile(r'\beval\s+\$', re.IGNORECASE),           # bash eval $var
+    re.compile(r'\bnew\s+Function\s*\(', re.IGNORECASE), # JS new Function(
+    re.compile(r'\bsetTimeout\s*\(\s*["\']', re.IGNORECASE),  # JS setTimeout with string
+    re.compile(r'\bsetInterval\s*\(\s*["\']', re.IGNORECASE), # JS setInterval with string
+]
+
+
+def _ai_app_sec_029_sanitize_llm_output(text: str) -> str:
+    """Remove lines from LLM output that contain dynamic code execution primitives."""
+    if not text:
+        return text
+    sanitized_lines = []
+    for line in text.splitlines(keepends=True):
+        if any(pattern.search(line) for pattern in _ai_app_sec_029_patterns):
+            logger.warning(
+                "_ai_app_sec_029_sanitize_llm_output: removed line containing "
+                "dynamic code execution primitive (length=%d)", len(line)
+            )
+        else:
+            sanitized_lines.append(line)
+    return "".join(sanitized_lines)
 
 
 def model_supports_function_calling(model_name: str):
@@ -36,9 +118,9 @@ def format_history_to_openai_mesages(
     messages = []
     messages.append(SystemMessage(content=system_message))
     for human, ai in tuple_history:
-        messages.append(HumanMessage(content=human))
+        messages.append(HumanMessage(content=_ai_app_sec_070_sanitize(human)))
         messages.append(AIMessage(content=ai))
-    messages.append(HumanMessage(content=question))
+    messages.append(HumanMessage(content=_ai_app_sec_070_sanitize(question)))
     return messages
 
 
@@ -128,7 +210,7 @@ def parse_chunk_response(
 
     if not supports_func_calling or not tool_calls:
         new_content = raw_chunk.content  # Just the new chunk's content
-        full_content = rolling_msg.content  # The full accumulated content
+        full_content = _ai_app_sec_029_sanitize_llm_output(rolling_msg.content)  # The full accumulated content
         return rolling_msg, new_content, full_content
 
     current_answers = get_answers_from_tool_calls(tool_calls)
@@ -136,6 +218,7 @@ def parse_chunk_response(
     if not full_answer:
         full_answer = previous_content
 
+    full_answer = _ai_app_sec_029_sanitize_llm_output(full_answer)
     new_content = full_answer[len(previous_content) :]
 
     return rolling_msg, new_content, full_answer
@@ -183,7 +266,7 @@ def parse_response(raw_response: RawRAGResponse, model_name: str) -> ParsedRAGRe
     else:
         answers.append(raw_response["answer"].content)
 
-    answer_str = "\n".join(answers)
+    answer_str = _ai_app_sec_029_sanitize_llm_output("\n".join(answers))
     parsed_response = ParsedRAGResponse(answer=answer_str, metadata=metadata)
     return parsed_response
 
