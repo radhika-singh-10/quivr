@@ -10,6 +10,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_mistralai import ChatMistralAI
+from langchain_ollama import ChatOllama
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from pydantic import SecretStr
 
@@ -18,6 +19,10 @@ from quivr_core.rag.entities.config import DefaultModelSuppliers, LLMEndpointCon
 from quivr_core.rag.utils import model_supports_function_calling
 
 logger = logging.getLogger("quivr_core")
+
+# Ollama models that emit <think> blocks. Ollama rejects reasoning=True for
+# models without thinking support, so only enable it for these prefixes.
+OLLAMA_REASONING_MODELS = ("deepseek-r1", "qwen3", "gpt-oss")
 
 
 class LLMTokenizer:
@@ -192,8 +197,10 @@ class LLMEndpoint:
     def __init__(self, llm_config: LLMEndpointConfig, llm: BaseChatModel):
         self._config = llm_config
         self._llm = llm
-        self._supports_func_calling = model_supports_function_calling(
-            self._config.model
+        # Ollama models cannot reliably fill the cited_answer tool call.
+        self._supports_func_calling = (
+            model_supports_function_calling(self._config.model)
+            and self._config.supplier != DefaultModelSuppliers.OLLAMA
         )
 
         self.llm_tokenizer = LLMTokenizer.load(
@@ -221,6 +228,7 @@ class LLMEndpoint:
             ChatMistralAI,
             ChatGoogleGenerativeAI,
             ChatGroq,
+            ChatOllama,
         ]
         try:
             if config.supplier == DefaultModelSuppliers.AZURE:
@@ -291,7 +299,21 @@ class LLMEndpoint:
                     max_tokens=config.max_output_tokens,
                     temperature=config.temperature,
                 )
-
+            elif config.supplier == DefaultModelSuppliers.OLLAMA:
+                _llm = ChatOllama(
+                    model=config.model,
+                    base_url=config.llm_base_url,
+                    temperature=config.temperature,
+                    num_predict=config.max_output_tokens,
+                    # Ollama's default context window is tiny and silently
+                    # truncates the RAG prompt, so size it explicitly.
+                    num_ctx=config.max_context_tokens + config.max_output_tokens,
+                    # Keeps <think>...</think> out of the answer content; the
+                    # reasoning lands in additional_kwargs["reasoning_content"].
+                    reasoning=True
+                    if config.model.startswith(OLLAMA_REASONING_MODELS)
+                    else None,
+                )
             else:
                 _llm = ChatOpenAI(
                     model=config.model,

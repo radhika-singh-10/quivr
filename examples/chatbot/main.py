@@ -3,38 +3,51 @@ import tempfile
 from uuid import uuid4
 
 import chainlit as cl
-from langchain_community.embeddings import OllamaEmbeddings
+import ollama
+from langchain_ollama import OllamaEmbeddings
 from quivr_core import Brain, register_processor
 from quivr_core.files.file import FileExtension
 from quivr_core.llm import LLMEndpoint
 from quivr_core.processor.implementations.simple_txt_processor import SimpleTxtProcessor
-from quivr_core.rag.entities.config import LLMEndpointConfig, RetrievalConfig
+from quivr_core.rag.entities.config import (
+    DefaultModelSuppliers,
+    LLMEndpointConfig,
+    RetrievalConfig,
+)
 
 # Parse .txt locally. Megaparse is the default and tries Quivr's hosted NATS,
 # which fails with "nodename nor servname provided" when that host is down.
 register_processor(FileExtension.txt, SimpleTxtProcessor, override=True)
 
-# ChatOpenAI requires a key even when the backend is Ollama.
-os.environ.setdefault("OPENAI_API_KEY", "ollama")
-
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2")
+OLLAMA_CHAT_MODEL = os.getenv("OLLAMA_CHAT_MODEL", "llama3.1")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 
+def ensure_ollama_models(*models: str) -> None:
+    """Pull any model the local Ollama server does not have yet."""
+    client = ollama.Client(host=OLLAMA_HOST)
+    installed = {m.model for m in client.list().models}
+    for model in models:
+        tag = model if ":" in model else f"{model}:latest"
+        if tag not in installed:
+            print(f"Pulling Ollama model {tag} (first run only)...")
+            client.pull(tag)
+
+
+ensure_ollama_models(OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL)
+
+
 def ollama_llm() -> LLMEndpoint:
-    llm = LLMEndpoint.from_config(
+    return LLMEndpoint.from_config(
         LLMEndpointConfig(
+            supplier=DefaultModelSuppliers.OLLAMA,
             model=OLLAMA_CHAT_MODEL,
-            llm_api_key="ollama",
-            llm_base_url=f"{OLLAMA_HOST.rstrip('/')}/v1",
+            llm_base_url=OLLAMA_HOST,
             max_output_tokens=8192,
             temperature=0.7,
         )
     )
-    # Local models usually cannot satisfy cited_answer tool calls.
-    llm._supports_func_calling = False
-    return llm
 
 
 def ollama_embedder() -> OllamaEmbeddings:

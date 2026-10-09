@@ -46,3 +46,20 @@ def test_llm_endpoint_constructor():
     )
 
     assert not llm_endpoint.supports_func_calling()
+
+
+@pytest.mark.base
+def test_llm_endpoint_from_config_ollama_deepseek_r1():
+    from langchain_ollama import ChatOllama
+    from quivr_core.rag.entities.config import DefaultModelSuppliers
+
+    config = LLMEndpointConfig(
+        supplier=DefaultModelSuppliers.OLLAMA, model="deepseek-r1"
+    )
+    llm = LLMEndpoint.from_config(config)
+
+    assert config.llm_base_url
+    assert not llm.supports_func_calling()
+    assert isinstance(llm._llm, ChatOllama)
+    assert llm._llm.model == "deepseek-r1"
+    assert llm._llm.reasoning is True

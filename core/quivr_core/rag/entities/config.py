@@ -19,6 +19,7 @@ from quivr_core.processor.splitter import SplitterConfig
 logger = logging.getLogger("quivr_core")
 MIN_CONTEXT_TOKENS = 4096
 MIN_OUTPUT_TOKENS = 4096
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 def normalize_to_env_variable_name(name: str) -> str:
@@ -75,6 +76,7 @@ class DefaultModelSuppliers(str, Enum):
     MISTRAL = "mistral"
     GROQ = "groq"
     GEMINI = "gemini"
+    OLLAMA = "ollama"
 
 
 class LLMConfig(QuivrBaseConfig):
@@ -275,6 +277,22 @@ class LLMModelConfig:
                 tokenizer_hub="Quivr/gemini-tokenizer",
             ),
         },
+        # Keep Ollama last: get_supplier_by_model_name matches by prefix, so
+        # "deepseek-r1" must not shadow Groq's "deepseek-r1-distill-llama-70b".
+        DefaultModelSuppliers.OLLAMA: {
+            "deepseek-r1": LLMConfig(
+                max_context_tokens=131072,
+                max_output_tokens=32768,
+            ),
+            "llama3.2": LLMConfig(
+                max_context_tokens=131072,
+                max_output_tokens=8192,
+            ),
+            "llama3.1": LLMConfig(
+                max_context_tokens=131072,
+                max_output_tokens=8192,
+            ),
+        },
     }
 
     @classmethod
@@ -348,6 +366,12 @@ class LLMEndpointConfig(QuivrBaseConfig):
 
     def set_api_key(self, force_reset: bool = False):
         if not self.supplier:
+            return
+
+        # Ollama runs locally and needs no API key, only a server URL.
+        if self.supplier == DefaultModelSuppliers.OLLAMA:
+            if not self.llm_base_url:
+                self.llm_base_url = os.getenv("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
             return
 
         # Check if the corresponding API key environment variable is set

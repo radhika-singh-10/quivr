@@ -25,7 +25,10 @@ This example demonstrates how to create a simple chatbot using Quivr and Chainli
 
 ## Running the Chatbot
 
-1. Define your API key as environment variable. e.g. `export OPENAI_API_KEY=your-key-here`
+1. Install and start [Ollama](https://ollama.com) (`ollama serve`). No API key is needed.
+   The app uses `llama3.1` for chat (set `OLLAMA_CHAT_MODEL=deepseek-r1` for the reasoning model) and `nomic-embed-text` for embeddings, and pulls
+   them on first start if they are missing. Override with `OLLAMA_CHAT_MODEL`,
+   `OLLAMA_EMBED_MODEL` or `OLLAMA_HOST`.
 
 2. Start the Chainlit server:
 
