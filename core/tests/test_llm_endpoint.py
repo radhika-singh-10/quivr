@@ -1,3 +1,23 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+# Each enforce() call site below carries a SiteDescriptor with:
+#   site_id            deterministic id for this exact call site (file +
+#                      symbol + insertion point + pattern) — stable across
+#                      re-scans, used to dedupe stub insertions and to look
+#                      up this site's policy mapping at runtime.
+#   candidate_policies policy IDs this site matched during the scan.
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 import os
 
 import pytest
@@ -14,11 +34,20 @@ def test_llm_endpoint_from_config_default():
     del os.environ["OPENAI_API_KEY"]
 
     with pytest.raises((ValidationError, ValueError)):
-        llm = LLMEndpoint.from_config(LLMEndpointConfig())
+        _lineaje_payload = LLMEndpointConfig()
+        # LINEAJE: enforce() `_lineaje_payload` at agent->external data_egress — scan flagged AI_IAC_024 (General purpose AI model integrations must reference a model card or technical documentation). Mask/block; do not remove without review. site_id='site:sha256:82e4afbf6c0cb6fbfbf1bd912a32e0016cf3b074c81f621facb6919d14631b4b'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:82e4afbf6c0cb6fbfbf1bd912a32e0016cf3b074c81f621facb6919d14631b4b', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'external_endpoint'}, candidate_policies=[{'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='ALLOW_WITH_AUDIT', source_type='agent', destination_type='external')
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=17)
+        llm = LLMEndpoint.from_config(_lineaje_payload)
 
     # Working default
     config = LLMEndpointConfig(llm_api_key="test")
     llm = LLMEndpoint.from_config(config=config)
+    # LINEAJE: enforce() `llm` at file_storage->agent file_upload — scan flagged AI_APP_SEC_028 (Do not use LLMs from the organization's disallowed list). Mask/block; do not remove without review. site_id='site:sha256:e747f18aa3a71b7eaaae6f847c1f89cc83ee82ec905c8342c63a8281d5b985ed'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:e747f18aa3a71b7eaaae6f847c1f89cc83ee82ec905c8342c63a8281d5b985ed', phase='file_upload', boundary={'source': 'file_upload', 'sink': 'agent_context'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_023', 'guardrail_id': 'Redact PII from uploaded files', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_024', 'guardrail_id': 'Redact PII (Singapore) from contents ofuploaded files', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='file_storage', destination_type='agent')
+    llm = _gr_client.enforce(_gr_site, llm, content_type='application/json')
 
     assert llm.supports_func_calling()
     assert isinstance(llm._llm, ChatOpenAI)
