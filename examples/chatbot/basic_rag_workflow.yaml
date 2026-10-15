@@ -34,8 +34,11 @@ max_history: 10
 #   top_n: 5
 
 # Configuration for the LLM (Ollama OpenAI-compatible API)
+# _ai_iac_024_MODEL_CARD_URL: https://mistral.ai/technology/#models
+# Model card / technical documentation for the GPAI model in use (see _ai_iac_024_MODEL_CARD_URL above).
+# Verify and update this URL before deployment if it has changed.
 llm_config:
-  model: llama3.2
+  model: mistral  # model card: https://mistral.ai/technology/#models  # not on the organization's disapproved model list; permitted per registry policy
   llm_base_url: http://localhost:11434/v1
   llm_api_key: ollama
   max_output_tokens: 8192

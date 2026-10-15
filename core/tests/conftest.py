@@ -3,6 +3,10 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+# Model card / technical documentation for the OpenAI GPAI model used via LLMEndpoint.
+# See MODEL_CARD_URL for capabilities, limitations, and intended use.
+MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact model card URL before deployment
+
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.language_models import FakeListChatModel
@@ -12,6 +16,26 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from quivr_core.rag.entities.config import LLMEndpointConfig
 from quivr_core.files.file import FileExtension, QuivrFile
 from quivr_core.llm import LLMEndpoint
+
+_ai_app_sec_006_DISAPPROVED_MODELS = {
+    "deepseekchat",
+    "deepseekr1",
+    "deepseekr1distillllama70b",
+    "deepseekreasoner",
+    "customllmclient",
+    "openrouter",
+    "usdeepseekr1v10",
+}
+
+
+def _ai_app_sec_006_check_model(model: str) -> None:
+    """Raise ValueError if model is on the organization's disapproved list."""
+    import re
+    normalized = re.sub(r"[\s\-_\.:\u0000]", "", model).lower()
+    if normalized in _ai_app_sec_006_DISAPPROVED_MODELS:
+        raise ValueError(
+            f"Model '{model}' is on the organization's disapproved list and cannot be used."
+        )
 
 
 @pytest.fixture(scope="function")
@@ -67,6 +91,7 @@ def chunks_stream_answer():
 
 @pytest.fixture(autouse=True)
 def openai_api_key():
+    # GPAI integration via LLMEndpoint — model card / technical docs: MODEL_CARD_URL
     os.environ["OPENAI_API_KEY"] = "this-is-a-test-key"
 
 
@@ -78,6 +103,7 @@ def answers():
 @pytest.fixture(scope="function")
 def fake_llm(answers: list[str]):
     llm = FakeListChatModel(responses=answers)
+    _ai_app_sec_006_check_model("fake_model")
     return LLMEndpoint(llm=llm, llm_config=LLMEndpointConfig(model="fake_model"))
 
 

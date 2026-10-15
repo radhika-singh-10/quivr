@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from pprint import PrettyPrinter
 from typing import Any, AsyncGenerator, Callable, Dict, Self, Type, Union
@@ -11,6 +12,11 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.vectorstores import VectorStore
 from langchain_openai import OpenAIEmbeddings
+import base64
+
+# Model card / technical documentation for the GPAI model used in this module.
+# See _ai_iac_024_MODEL_CARD_URL for the reference.
+_ai_iac_024_MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact model card URL before deployment
 from rich.console import Console
 from rich.panel import Panel
 
@@ -43,6 +49,148 @@ from .brain_defaults import build_default_vectordb, default_embedder, default_ll
 
 logger = logging.getLogger("quivr_core")
 
+# Prompt-injection detection patterns (compiled once at module load)
+_ai_app_sec_040_patterns = [
+    # Direct instruction-override attempts
+    re.compile(
+        r"(ignore|disregard|forget|override|bypass)\s+(all\s+)?(previous|prior|above|earlier|system)\s+(instructions?|prompts?|rules?|constraints?)",
+        re.IGNORECASE,
+    ),
+    # Role/persona hijacking
+    re.compile(
+        r"(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|your\s+new\s+(role|persona|instructions?)\s+(is|are))",
+        re.IGNORECASE,
+    ),
+    # Shell command injection
+    re.compile(
+        r"(\$\(|`[^`]*`|\bos\.system\s*\(|\bsubprocess\s*\.\s*(call|run|Popen)\s*\(|\beval\s*\(|\bexec\s*\()",
+        re.IGNORECASE,
+    ),
+    # Leetspeak variants of "ignore" / "system" (e.g. 1gn0r3, syst3m)
+    re.compile(
+        r"(1[g9][n][0o][r][3e]|[s5][y][s5][t7][e3][m]|[i1][n][s5][t7][r][u][c][t7][i1][o0][n][s5])",
+        re.IGNORECASE,
+    ),
+    # Hidden / zero-width characters used to smuggle instructions
+    re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]"),
+]
+
+# Minimum length of a base64 blob worth decoding and re-scanning
+_ai_app_sec_040_B64_MIN_LEN = 40
+_ai_app_sec_040_b64_token = re.compile(r"[A-Za-z0-9+/]{" + str(_ai_app_sec_040_B64_MIN_LEN) + r",}={0,2}")
+
+
+def _ai_app_sec_040_scan_chunk(doc: "Document") -> bool:
+    """Return True if the document chunk appears safe, False if suspicious.
+
+    Checks performed:
+    * Known prompt-injection / instruction-override phrases.
+    * Leetspeak obfuscation of sensitive keywords.
+    * Zero-width / invisible Unicode characters.
+    * Shell-command injection primitives.
+    * Base64-encoded payloads that themselves contain injection patterns.
+    """
+    text = doc.page_content or ""
+
+    # 1. Direct pattern scan on raw text
+    for pattern in _ai_app_sec_040_patterns:
+        if pattern.search(text):
+            logger.warning(
+                "Prompt injection pattern detected in document chunk (metadata=%s). Skipping chunk.",
+                {k: v for k, v in (doc.metadata or {}).items() if k in ("source", "page", "file_name")},
+            )
+            return False
+
+    # 2. Decode any base64 blobs and re-scan the decoded text
+    for match in _ai_app_sec_040_b64_token.finditer(text):
+        blob = match.group(0)
+        # Pad to a valid length
+        padded = blob + "=" * (-len(blob) % 4)
+        try:
+            decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        for pattern in _ai_app_sec_040_patterns:
+            if pattern.search(decoded):
+                logger.warning(
+                    "Base64-encoded prompt injection detected in document chunk (metadata=%s). Skipping chunk.",
+                    {k: v for k, v in (doc.metadata or {}).items() if k in ("source", "page", "file_name")},
+                )
+                return False
+
+    return True
+
+import re
+
+_ai_app_sec_029_patterns = re.compile(
+    r"(?:"
+    r"\beval\s*\("
+    r"|\bexec\s*\("
+    r"|\bsubprocess\s*\.\s*\w*\s*\([^)]*shell\s*=\s*True"
+    r"|\bos\.system\s*\("
+    r"|\bos\.popen\s*\("
+    r"|\bcommands\.getoutput\s*\("
+    r"|\bexecfile\s*\("
+    r"|\bcompile\s*\("
+    r"|\b__import__\s*\("
+    r"|\bimportlib\.import_module\s*\("
+    r"|\bctypes\s*\."
+    r"|\$\(.*\)"
+    r"|`[^`]*`"
+    r"|\beval\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _ai_app_sec_029_sanitize_response(text: str) -> str:
+    """
+    Remove lines from LLM response that contain dynamic code execution primitives.
+    Targets: eval, exec, subprocess(shell=True), os.system, os.popen, bash eval,
+    JS eval, execfile, compile, __import__, importlib, ctypes, shell substitution.
+    """
+    sanitized_lines = []
+    for line in text.splitlines(keepends=True):
+        if _ai_app_sec_029_patterns.search(line):
+            logger.warning(
+                "[ai_app_sec_029] Removed potentially dangerous line from LLM response "
+                "(length=%d)", len(line)
+            )
+        else:
+            sanitized_lines.append(line)
+    return "".join(sanitized_lines)
+
+_AI_APP_SEC_006_DISAPPROVED_MODELS = [
+    "deepseekchat",
+    "deepseekr1",
+    "deepseekr1distillllama70b",
+    "deepseekreasoner",
+    "customllmclientnull",
+    "deepseekchatnull",
+    "openrouternull",
+    "usdeepseekr1v10null",
+]
+
+
+def _ai_app_sec_006_normalize(model_id: str) -> str:
+    """Normalize a model identifier for comparison against the disapproved list."""
+    import re
+    return re.sub(r"[\s\-_\.:\u0000]", "", model_id).lower()
+
+
+def _ai_app_sec_006_check_model(model_id: str | None) -> None:
+    """Raise ValueError if model_id matches a disapproved model."""
+    if model_id is None:
+        return
+    normalized = _ai_app_sec_006_normalize(model_id)
+    for disapproved in _AI_APP_SEC_006_DISAPPROVED_MODELS:
+        if disapproved in normalized or normalized in disapproved:
+            raise ValueError(
+                f"Model '{model_id}' is on the organization's disapproved list "
+                f"and cannot be used."
+            )
+
+
 
 async def process_files(
     storage: StorageBase, skip_file_error: bool, **processor_kwargs: dict[str, Any]
@@ -69,7 +217,14 @@ async def process_files(
                 logger.debug(f"processing {file} using class {processor_cls.__name__}")
                 processor = processor_cls(**processor_kwargs)
                 docs = await processor.process_file(file)
-                knowledge.extend(docs.chunks)
+                safe_chunks = [c for c in docs.chunks if _ai_app_sec_040_scan_chunk(c)]
+                if len(safe_chunks) < len(docs.chunks):
+                    logger.warning(
+                        "Dropped %d suspicious chunk(s) from file %s",
+                        len(docs.chunks) - len(safe_chunks),
+                        file,
+                    )
+                knowledge.extend(safe_chunks)
             else:
                 logger.error(f"can't find processor for {file}")
                 if skip_file_error:
@@ -130,6 +285,8 @@ class Brain:
         self.default_chat = list(self._chats.values())[0]
 
         # RAG dependencies:
+        if llm is not None:
+            _ai_app_sec_006_check_model(getattr(llm, "model", None) or getattr(getattr(llm, "llm", None), "model_name", None))
         self.llm = llm
         self.vector_db = vector_db
         self.embedder = embedder
@@ -180,6 +337,7 @@ class Brain:
         if bserialized.embedding_config.embedder_type == "openai_embedding":
             from langchain_openai import OpenAIEmbeddings
 
+            # GPAI model documentation: see _ai_iac_024_MODEL_CARD_URL
             embedder = OpenAIEmbeddings(**bserialized.embedding_config.config)
         else:
             raise ValueError("unknown embedder")
@@ -605,7 +763,8 @@ class Brain:
             if response.metadata:
                 metadata = response.metadata
 
-        return ParsedRAGResponse(answer=full_answer, metadata=metadata)
+        sanitized_answer = _ai_app_sec_029_sanitize_response(full_answer)
+        return ParsedRAGResponse(answer=sanitized_answer, metadata=metadata)
 
     def ask(
         self,
