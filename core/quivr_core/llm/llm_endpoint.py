@@ -1,3 +1,23 @@
+def _lineaje_load_gr_client():
+    import sys as _lineaje_sys, os as _lineaje_os, importlib.util as _lineaje_ilu
+    if "_lineaje_gr_stub_client" in _lineaje_sys.modules:
+        return _lineaje_sys.modules["_lineaje_gr_stub_client"]
+    _here = _lineaje_os.path.dirname(_lineaje_os.path.abspath(__file__))
+    _cur, _path = _here, _lineaje_os.path.join(_here, "gr_stub_client.py")
+    for _ in range(8):
+        _cand = _lineaje_os.path.join(_cur, "gr_stub_client.py")
+        if _lineaje_os.path.isfile(_cand):
+            _path = _cand
+            break
+        _parent = _lineaje_os.path.dirname(_cur)
+        if _parent == _cur:
+            break
+        _cur = _parent
+    _spec = _lineaje_ilu.spec_from_file_location("_lineaje_gr_stub_client", _path)
+    _mod = _lineaje_ilu.module_from_spec(_spec)
+    _lineaje_sys.modules["_lineaje_gr_stub_client"] = _mod
+    _spec.loader.exec_module(_mod)
+    return _mod
 import logging
 import os
 import time
@@ -53,8 +73,29 @@ class LLMTokenizer:
 
                     self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_hub)
             except OSError:  # if we don't manage to connect to huggingface and/or no cached models are present
+                _lineaje_payload_76 = f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
+                try:
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    _gr_decision = _gr_client.check(_gr_site, _lineaje_payload_76, content_type='application/json')
+                    if _gr_decision.blocked:
+                        raise _gr_decision.as_error()
+                    _lineaje_payload_76 = _gr_decision.payload
+                    _gr_client.persist_runtime_mask_to_source(
+                        _lineaje_payload_76, source_file=__file__, variable_name='_lineaje_payload_76', before_line=76
+                    )
+                except PermissionError:
+                    raise
+                except Exception as _gr_exc:
+                    import logging as _lineaje_logging
+                    _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                        "Lineaje guardrail unavailable at site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+                    )
+                    raise PermissionError(
+                        f"Lineaje guardrail unavailable at site_id='site:sha256:5c6a6c5e82edb580ed4cab54a9cb7ba4af17657e237d98a84ab76e14ad6a4a90' and fail_mode=BLOCK: {_gr_exc}"
+                    ) from _gr_exc
                 logger.warning(
-                    f"Cannot acces the configured tokenizer from {self.tokenizer_hub}, using the default tokenizer {self.fallback_tokenizer}"
+                    _lineaje_payload_76
                 )
                 self.tokenizer = tiktoken.get_encoding(self.fallback_tokenizer)
         else:
@@ -81,7 +122,28 @@ class LLMTokenizer:
                 try:
                     total_size += os.path.getsize(file_path)
                 except (OSError, FileNotFoundError):
-                    logger.debug(f"Could not access tokenizer file: {file_path}")
+                    _lineaje_payload_104 = f"Could not access tokenizer file: {file_path}"
+                    try:
+                        _gr_client = _lineaje_load_gr_client()
+                        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                        _gr_decision = _gr_client.check(_gr_site, _lineaje_payload_104, content_type='application/json')
+                        if _gr_decision.blocked:
+                            raise _gr_decision.as_error()
+                        _lineaje_payload_104 = _gr_decision.payload
+                        _gr_client.persist_runtime_mask_to_source(
+                            _lineaje_payload_104, source_file=__file__, variable_name='_lineaje_payload_104', before_line=104
+                        )
+                    except PermissionError:
+                        raise
+                    except Exception as _gr_exc:
+                        import logging as _lineaje_logging
+                        _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                            "Lineaje guardrail unavailable at site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+                        )
+                        raise PermissionError(
+                            f"Lineaje guardrail unavailable at site_id='site:sha256:596034588626a1bf5d0a2b7e1aa5cd77c7da97a36fd0c15ce3a4c2a65621b2b8' and fail_mode=BLOCK: {_gr_exc}"
+                        ) from _gr_exc
+                    logger.debug(_lineaje_payload_104)
 
         return total_size if total_size > 0 else self._default_size
 
@@ -116,6 +178,40 @@ class LLMTokenizer:
         # Add new instance to cache with current timestamp
         cls._cache[cache_key] = (instance, instance._size_bytes, time.time())
         cls._current_cache_size += instance._size_bytes
+        try:
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            _gr_decision = _gr_client.check(_gr_site, instance, content_type='text/plain')
+            if _gr_decision.blocked:
+                raise _gr_decision.as_error()
+            instance = _gr_decision.payload
+        except PermissionError:
+            raise
+        except Exception as _gr_exc:
+            import logging as _lineaje_logging
+            _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                "Lineaje guardrail unavailable at site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+            )
+            raise PermissionError(
+                f"Lineaje guardrail unavailable at site_id='site:sha256:c2b86f39af3d205dd3ee02b5792f65adc9897f9ac4c22f6f03eb45555d15bf4e' and fail_mode=BLOCK: {_gr_exc}"
+            ) from _gr_exc
+        try:
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ec939ab69dfebfb9b8661cc37b41bf03e6d4a940d913205e4816b66d571e23d4', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            _gr_decision = _gr_client.check(_gr_site, instance, content_type='text/plain')
+            if _gr_decision.blocked:
+                raise _gr_decision.as_error()
+            instance = _gr_decision.payload
+        except PermissionError:
+            raise
+        except Exception as _gr_exc:
+            import logging as _lineaje_logging
+            _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                "Lineaje guardrail unavailable at site_id='site:sha256:ec939ab69dfebfb9b8661cc37b41bf03e6d4a940d913205e4816b66d571e23d4' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+            )
+            raise PermissionError(
+                f"Lineaje guardrail unavailable at site_id='site:sha256:ec939ab69dfebfb9b8661cc37b41bf03e6d4a940d913205e4816b66d571e23d4' and fail_mode=BLOCK: {_gr_exc}"
+            ) from _gr_exc
         return instance
 
     @classmethod
@@ -183,7 +279,28 @@ class LLMTokenizer:
                     f"Cache count: {len(cls._cache)}"
                 )
             except Exception as e:
-                logger.warning(f"Failed to preload tokenizer {hub}: {str(e)}")
+                _lineaje_payload = f"Failed to preload tokenizer {hub}: {str(e)}"
+                try:
+                    _gr_client = _lineaje_load_gr_client()
+                    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                    _gr_decision = _gr_client.check(_gr_site, _lineaje_payload, content_type='application/json')
+                    if _gr_decision.blocked:
+                        raise _gr_decision.as_error()
+                    _lineaje_payload = _gr_decision.payload
+                    _gr_client.persist_runtime_mask_to_source(
+                        _lineaje_payload, source_file=__file__, variable_name='_lineaje_payload', before_line=207
+                    )
+                except PermissionError:
+                    raise
+                except Exception as _gr_exc:
+                    import logging as _lineaje_logging
+                    _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                        "Lineaje guardrail unavailable at site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+                    )
+                    raise PermissionError(
+                        f"Lineaje guardrail unavailable at site_id='site:sha256:a3126c7630767aa25bb1a591e6417fc30e963e3b7d1ac3d75f099679f9f55f41' and fail_mode=BLOCK: {_gr_exc}"
+                    ) from _gr_exc
+                logger.warning(_lineaje_payload)
 
 
 class LLMEndpoint:
@@ -305,6 +422,23 @@ class LLMEndpoint:
             instance = cls(llm=_llm, llm_config=config)
             cls._cache[hashed_config] = instance
 
+            try:
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+                _gr_decision = _gr_client.check(_gr_site, instance, content_type='text/plain')
+                if _gr_decision.blocked:
+                    raise _gr_decision.as_error()
+                instance = _gr_decision.payload
+            except PermissionError:
+                raise
+            except Exception as _gr_exc:
+                import logging as _lineaje_logging
+                _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                    "Lineaje guardrail unavailable at site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9' (%s) — blocking (fail_mode=BLOCK)", _gr_exc
+                )
+                raise PermissionError(
+                    f"Lineaje guardrail unavailable at site_id='site:sha256:4c0d036e91ceb510563023d246840efd804ab1bbceffcbc39890822c72ae4dc9' and fail_mode=BLOCK: {_gr_exc}"
+                ) from _gr_exc
             return instance
 
         except ImportError as e:
