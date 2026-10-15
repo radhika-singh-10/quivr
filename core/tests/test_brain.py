@@ -35,7 +35,7 @@ def test_brain_empty_files(fake_llm, embedder, mem_vector_store):
 
 @pytest.mark.asyncio
 async def test_brain_from_files_success(
-    fake_llm: LLMEndpoint, embedder, temp_data_file, mem_vector_store
+    fake_llm, embedder, temp_data_file, mem_vector_store
 ):
     brain = await Brain.afrom_files(
         name="test_brain",
@@ -104,8 +104,14 @@ async def test_brain_get_history(
         vector_db=mem_vector_store,
     )
 
-    await brain.aask("question")
-    await brain.aask("question")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("LLM interaction: sending question to brain.aask")
+    response1 = await brain.aask("question")
+    logger.info("LLM interaction: received response from brain.aask: %s", response1)
+    logger.info("LLM interaction: sending question to brain.aask")
+    response2 = await brain.aask("question")
+    logger.info("LLM interaction: received response from brain.aask: %s", response2)
 
     assert len(brain.default_chat) == 4
 
@@ -119,9 +125,14 @@ async def test_brain_ask_streaming(
         name="test_brain", file_paths=[temp_data_file], embedder=embedder, llm=fake_llm
     )
 
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("LLM interaction: sending question to brain.ask_streaming")
     response = ""
     async for chunk in brain.ask_streaming("question"):
+        logger.info("LLM interaction: received streaming chunk from brain.ask_streaming: %s", chunk.answer)
         response += chunk.answer
+    logger.info("LLM interaction: completed brain.ask_streaming, full response: %s", response)
 
     assert response == answers[1]
 
