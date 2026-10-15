@@ -23,6 +23,65 @@ from quivr_core.rag.prompts import TemplatePromptName, custom_prompts
 logger = logging.getLogger("quivr_core")
 
 
+_INJECTION_PATTERNS = [
+    r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+    r"(?i)disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+    r"(?i)forget\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+    r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are))\s+",
+    r"(?i)\bsystem\s*:\s*",
+    r"(?i)\bassistant\s*:\s*",
+    r"(?i)<\s*/?\s*(system|user|assistant|prompt|instruction)\s*>",
+    r"(?i)\[\s*(system|user|assistant|prompt|instruction)\s*\]",
+    r"(?i)###\s*(system|user|assistant|instruction)",
+]
+
+
+def sanitize_input(text: str) -> str:
+    """Strip common prompt-injection patterns from a user-supplied string."""
+    import re
+
+    if not isinstance(text, str):
+        return text
+    for pattern in _INJECTION_PATTERNS:
+        text = re.sub(pattern, "", text)
+    return text
+
+# Patterns for dangerous dynamic code execution primitives
+_DANGEROUS_PATTERNS = [
+    r"\beval\s*\(",
+    r"\bexec\s*\(",
+    r"\bsubprocess\s*\.\s*\w*\s*\([^)]*shell\s*=\s*True",
+    r"\bos\.system\s*\(",
+    r"\bos\.popen\s*\(",
+    r"\b__import__\s*\(",
+    r"\bcompile\s*\(",
+    r"\bexecfile\s*\(",
+    r"\binput\s*\(",
+]
+
+
+def sanitize_llm_output(text: str) -> str:
+    """Remove lines containing dangerous dynamic code execution primitives from LLM output."""
+    import re
+    if not isinstance(text, str):
+        return text
+    lines = text.splitlines(keepends=True)
+    safe_lines = []
+    for line in lines:
+        dangerous = False
+        for pattern in _DANGEROUS_PATTERNS:
+            if re.search(pattern, line):
+                logger.warning(
+                    "Removed dangerous code execution primitive from LLM output: %s",
+                    line.rstrip(),
+                )
+                dangerous = True
+                break
+        if not dangerous:
+            safe_lines.append(line)
+    return "".join(safe_lines)
+
+
 def model_supports_function_calling(model_name: str):
     models_not_supporting_function_calls: list[str] = ["llama2", "test", "ollama3"]
 
@@ -36,9 +95,9 @@ def format_history_to_openai_mesages(
     messages = []
     messages.append(SystemMessage(content=system_message))
     for human, ai in tuple_history:
-        messages.append(HumanMessage(content=human))
+        messages.append(HumanMessage(content=sanitize_input(human)))
         messages.append(AIMessage(content=ai))
-    messages.append(HumanMessage(content=question))
+    messages.append(HumanMessage(content=sanitize_input(question)))
     return messages
 
 
@@ -91,7 +150,7 @@ def get_chunk_metadata(
                 )
 
     metadata["citations"] = all_citations
-    metadata["followup_questions"] = all_followup_questions[:3]  # Limit to 3
+    metadata["followup_questions"] = [sanitize_llm_output(q) for q in all_followup_questions[:3]]  # Limit to 3
 
     return RAGResponseMetadata(**metadata, metadata_model=None)
 
@@ -122,6 +181,13 @@ def parse_chunk_response(
     Returns:
         Tuple of (updated rolling message, new content only, full content)
     """
+    logger.debug(
+        "parse_chunk_response input: raw_chunk.content=%r, supports_func_calling=%r, previous_content=%r",
+        raw_chunk.content,
+        supports_func_calling,
+        previous_content,
+    )
+
     rolling_msg += raw_chunk
 
     tool_calls = rolling_msg.tool_calls
@@ -129,6 +195,11 @@ def parse_chunk_response(
     if not supports_func_calling or not tool_calls:
         new_content = raw_chunk.content  # Just the new chunk's content
         full_content = rolling_msg.content  # The full accumulated content
+        logger.debug(
+            "parse_chunk_response output: new_content=%r, full_content=%r",
+            new_content,
+            full_content,
+        )
         return rolling_msg, new_content, full_content
 
     current_answers = get_answers_from_tool_calls(tool_calls)
@@ -138,6 +209,11 @@ def parse_chunk_response(
 
     new_content = full_answer[len(previous_content) :]
 
+    logger.debug(
+        "parse_chunk_response output: new_content=%r, full_answer=%r",
+        new_content,
+        full_answer,
+    )
     return rolling_msg, new_content, full_answer
 
 
@@ -155,6 +231,12 @@ def get_answers_from_tool_calls(tool_calls):
 
 @no_type_check
 def parse_response(raw_response: RawRAGResponse, model_name: str) -> ParsedRAGResponse:
+    logger.info(
+        "parse_response input: model_name=%r, answer=%r, num_docs=%d",
+        model_name,
+        raw_response.get("answer"),
+        len(raw_response.get("docs", [])),
+    )
     answers = []
     sources = raw_response["docs"] if "docs" in raw_response else []
 
@@ -183,7 +265,7 @@ def parse_response(raw_response: RawRAGResponse, model_name: str) -> ParsedRAGRe
     else:
         answers.append(raw_response["answer"].content)
 
-    answer_str = "\n".join(answers)
+    answer_str = sanitize_llm_output("\n".join(answers))
     parsed_response = ParsedRAGResponse(answer=answer_str, metadata=metadata)
     return parsed_response
 
@@ -196,7 +278,7 @@ def combine_documents(
     # for each docs, add an index in the metadata to be able to cite the sources
     for doc, index in zip(docs, range(len(docs)), strict=False):
         doc.metadata["index"] = index
-    doc_strings = [format_document(doc, document_prompt) for doc in docs]
+    doc_strings = [sanitize_input(format_document(doc, document_prompt)) for doc in docs]
     return document_separator.join(doc_strings)
 
 

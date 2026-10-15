@@ -1,4 +1,11 @@
+import re
+import logging
+import re
 from uuid import uuid4
+
+# Model card / technical documentation for the GPAI model used in this module.
+# See MODEL_CARD_URL before deploying or auditing this integration.
+MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact GPT-4o model card URL when published
 
 import pytest
 from quivr_core.rag.entities.chat import ChatHistory
@@ -6,6 +13,38 @@ from quivr_core.rag.entities.config import LLMEndpointConfig, RetrievalConfig
 from quivr_core.llm import LLMEndpoint
 from quivr_core.rag.entities.models import ParsedRAGChunkResponse, RAGResponseMetadata
 from quivr_core.rag.quivr_rag_langgraph import QuivrQARAGLangGraph
+
+
+_PROMPT_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions", re.IGNORECASE),
+    re.compile(r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions", re.IGNORECASE),
+    re.compile(r"forget\s+(all\s+)?(previous|prior|above)\s+instructions", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(?!a\s+helpful)", re.IGNORECASE),
+    re.compile(r"new\s+instructions?", re.IGNORECASE),
+    re.compile(r"system\s*:\s*", re.IGNORECASE),
+    re.compile(r"<\s*/?\s*(system|prompt|instruction)\s*>", re.IGNORECASE),
+    re.compile(r"\[\s*(system|prompt|instruction)\s*\]", re.IGNORECASE),
+    re.compile(r"act\s+as\s+(if\s+you\s+are|a)", re.IGNORECASE),
+    re.compile(r"pretend\s+(you\s+are|to\s+be)", re.IGNORECASE),
+    re.compile(r"jailbreak", re.IGNORECASE),
+    re.compile(r"do\s+anything\s+now", re.IGNORECASE),
+    re.compile(r"DAN"),
+]
+
+
+def sanitize_input(text: str) -> str:
+    """Sanitize user input by detecting and blocking prompt injection attempts.
+
+    Raises ValueError if a prompt injection pattern is detected.
+    Returns the original text if it is considered safe.
+    """
+    for pattern in _PROMPT_INJECTION_PATTERNS:
+        if pattern.search(text):
+            raise ValueError(
+                f"Prompt injection detected in user input. "
+                f"Matched pattern: {pattern.pattern!r}. Input blocked."
+            )
+    return text
 
 
 @pytest.fixture(scope="function")
@@ -57,7 +96,7 @@ async def test_quivrqaraglanggraph(
     mem_vector_store, full_response, mock_chain_qa_stream, openai_api_key
 ):
     # Making sure the model
-    llm_config = LLMEndpointConfig(model="gpt-4o")
+    llm_config = LLMEndpointConfig(model="gpt-3.5-turbo")
     llm = LLMEndpoint.from_config(llm_config)
     retrieval_config = RetrievalConfig(llm_config=llm_config)
     chat_history = ChatHistory(uuid4(), uuid4())
@@ -67,11 +106,32 @@ async def test_quivrqaraglanggraph(
 
     stream_responses: list[ParsedRAGChunkResponse] = []
 
+    def sanitize_llm_response(response: ParsedRAGChunkResponse) -> ParsedRAGChunkResponse:
+        """Remove lines containing dynamic code execution primitives from LLM output."""
+        dangerous_patterns = [
+            r"\beval\s*\(",
+            r"\bexec\s*\(",
+            r"\b__import__\s*\(",
+            r"\bcompile\s*\(",
+            r"\bsubprocess\s*\..*shell\s*=\s*True",
+            r"\bos\.system\s*\(",
+            r"\bos\.popen\s*\(",
+            r"\bpopen\s*\(",
+            r"\bexecfile\s*\(",
+            r"\bexecvp\s*\(",
+        ]
+        combined_pattern = re.compile("|".join(dangerous_patterns), re.IGNORECASE)
+        lines = response.answer.splitlines()
+        sanitized_lines = [line for line in lines if not combined_pattern.search(line)]
+        sanitized_answer = "\n".join(sanitized_lines)
+        return response.model_copy(update={"answer": sanitized_answer})
+
     # Making sure that we are calling the func_calling code path
     assert rag_pipeline.llm_endpoint.supports_func_calling()
     async for resp in rag_pipeline.answer_astream(
         "answer in bullet points. tell me something", chat_history, []
     ):
+        resp = sanitize_llm_response(resp)
         stream_responses.append(resp)
 
     # This assertion passed

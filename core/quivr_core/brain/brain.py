@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import logging
 import os
+import re
 from pathlib import Path
 from pprint import PrettyPrinter
 from typing import Any, AsyncGenerator, Callable, Dict, Self, Type, Union
@@ -10,7 +12,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.vectorstores import VectorStore
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from rich.console import Console
 from rich.panel import Panel
 
@@ -39,10 +41,253 @@ from quivr_core.rag.quivr_rag_langgraph import QuivrQARAGLangGraph
 from quivr_core.storage.local_storage import LocalStorage, TransparentStorage
 from quivr_core.storage.storage_base import StorageBase
 
-from .brain_defaults import build_default_vectordb, default_embedder, default_llm
+from .brain_defaults import build_default_vectordb
+
+import re
+
+import re
 
 logger = logging.getLogger("quivr_core")
 
+# Known prompt injection / role-override patterns
+_INJECTION_PATTERNS = re.compile(
+    r"(ignore (previous|all|above|prior)|disregard|forget (previous|all|above|prior)"
+    r"|you are now|act as|pretend (you are|to be)|system:|<system>|\[system\]"
+    r"|###\s*(system|instruction|prompt)|<\|im_start\||<\|im_end\|>"
+    r"|\bDAN\b|jailbreak|override (instructions?|prompt|system)"
+    r"|new instructions?:|\[INST\]|\[/INST\])",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_input(value: str, field_name: str = "input") -> str:
+    """Sanitize user-supplied input before it reaches the LLM.
+
+    Raises ValueError and logs a warning if injection patterns are detected.
+    Returns the original value (stripped) if it is clean.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    stripped = value.strip()
+    if _INJECTION_PATTERNS.search(stripped):
+        logger.warning(
+            "Potential prompt injection detected in %s: %r — request blocked.",
+            field_name,
+            stripped[:200],
+        )
+        raise ValueError(
+            f"Input rejected: {field_name} contains disallowed instruction-like patterns."
+        )
+    return stripped
+
+
+def _wrap_user_question(question: str) -> str:
+    """Wrap the sanitized user question in structural delimiters so the model
+    can clearly distinguish the fixed instruction context from user-provided data."""
+    return f"<user_question>\n{question}\n</user_question>"
+
+import re
+
+
+def sanitize_leetspeak(text: str) -> str:
+    """
+    Detect and replace leetspeak-obfuscated prompts, system commands, or
+    executables with a safe placeholder.
+    Leetspeak maps digits/symbols to letters, e.g. 4->a, 3->e, 1->i/l,
+    0->o, 5->s, 7->t, etc.
+    """
+    # Normalise common leet substitutions to plain ASCII for detection
+    leet_map = str.maketrans("4831057@$", "aebiotsas")
+
+    def _normalise(s: str) -> str:
+        return s.lower().translate(leet_map)
+
+    # Patterns that indicate prompt-injection or command execution intent
+    _INJECTION_PATTERNS = [
+        # Instruction-style directives
+        r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|commands?)",
+        r"(system|assistant|user)\s*:\s*",
+        r"you\s+are\s+(now\s+)?(a|an)\s+",
+        r"act\s+as\s+(a|an)\s+",
+        r"disregard\s+(all\s+)?(previous|prior|above)",
+        r"do\s+not\s+follow",
+        r"override\s+(the\s+)?(system|instructions?|prompt)",
+        r"new\s+instructions?",
+        r"forget\s+(all\s+)?(previous|prior|above)",
+        # Shell / executable patterns
+        r"(exec|eval|system|popen|subprocess|shell_exec|passthru|cmd|powershell|bash|sh)\s*[\(\[]",
+        r"(rm|del|format|mkfs|dd|wget|curl|chmod|chown|sudo|su)\s+",
+        r"<\s*script[^>]*>",
+        r"javascript\s*:",
+    ]
+
+    # Tokenise into whitespace-separated words; check each word after
+    # leet-normalisation, then check the full normalised text for multi-word
+    # patterns.
+    normalised = _normalise(text)
+
+    for pattern in _INJECTION_PATTERNS:
+        if re.search(pattern, normalised, re.IGNORECASE):
+            return "<leetspeak_prompts_removed>"
+
+    return text
+
+
+# Patterns for dynamic code execution primitives that must be removed from LLM output
+_DANGEROUS_PATTERNS = re.compile(
+    r"(?m)^.*"
+    r"(?:"
+    r"\beval\s*\("
+    r"|\bexec\s*\("
+    r"|\bexecfile\s*\("
+    r"|\bcompile\s*\("
+    r"|\b__import__\s*\("
+    r"|subprocess\.(?:call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True"
+    r"|os\.system\s*\("
+    r"|os\.popen\s*\("
+    r"|commands\.getoutput\s*\("
+    r"|\beval\b"
+    r"|\bFunction\s*\("
+    r"|setTimeout\s*\("
+    r"|setInterval\s*\("
+    r"|new\s+Function\s*\("
+    r"|bash\s+-c"
+    r"|\$\(.*\)"
+    r").*$"
+)
+
+
+def sanitize_llm_output(text: str) -> str:
+    """
+    Sanitize LLM output by removing lines that contain dynamic code execution
+    primitives such as eval, exec, subprocess(shell=True), JS eval, bash eval, etc.
+    Args:
+        text (str): The raw LLM output text.
+    Returns:
+        str: The sanitized text with dangerous lines removed.
+    """
+    lines = text.splitlines(keepends=True)
+    sanitized_lines = []
+    for line in lines:
+        if _DANGEROUS_PATTERNS.search(line):
+            logger.warning(
+                "Removed potentially dangerous line from LLM output: %s",
+                line.rstrip(),
+            )
+        else:
+            sanitized_lines.append(line)
+    return "".join(sanitized_lines)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-injection sanitisation helpers
+# ---------------------------------------------------------------------------
+
+# Invisible / zero-width Unicode characters used to hide text
+_INVISIBLE_CHARS_RE = re.compile(
+    r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\u2028\u2029]"
+)
+
+# Common direct prompt-injection phrases (case-insensitive)
+_INJECTION_PHRASES_RE = re.compile(
+    r"(ignore (all |previous |prior |above |the above |your )?(instructions?|prompts?|context|rules?|system|constraints?)"
+    r"|disregard (all |previous |prior |above |the above |your )?(instructions?|prompts?|context|rules?|system|constraints?)"
+    r"|forget (all |previous |prior |above |the above |your )?(instructions?|prompts?|context|rules?|system|constraints?)"
+    r"|you are now|act as (a |an )?|new (role|persona|identity|instructions?)"
+    r"|system prompt|<\|im_start\||<\|im_end\||\[INST\]|\[/INST\]"
+    r"|###\s*(instruction|system|human|assistant))",
+    re.IGNORECASE,
+)
+
+# Shell / OS command patterns
+_SHELL_CMD_RE = re.compile(
+    r"(\$\(|`[^`]+`|\beval\b|\bexec\b|\bos\.system\b|\bsubprocess\b"
+    r"|\brm\s+-rf\b|\bcurl\b.*\bhttp|\bwget\b.*\bhttp"
+    r"|\bpowershell\b|\bcmd\.exe\b|\b/bin/(sh|bash|zsh)\b)",
+    re.IGNORECASE,
+)
+
+# Leetspeak substitution table (reverse: leet → normal)
+_LEET_TABLE = str.maketrans("013456789@$", "oieashgtbas")
+
+
+def _decode_leet(text: str) -> str:
+    """Return a rough plain-text version of a leetspeak string."""
+    return text.translate(_LEET_TABLE)
+
+
+def _extract_base64_strings(text: str) -> list[str]:
+    """Return decoded text for every plausible base64 blob found in *text*."""
+    decoded: list[str] = []
+    # Base64 tokens that are at least 20 chars long
+    for token in re.findall(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+        try:
+            candidate = base64.b64decode(token + "==").decode("utf-8", errors="ignore")
+            if candidate.isprintable() or len(candidate) > 10:
+                decoded.append(candidate)
+        except Exception:
+            pass
+    return decoded
+
+
+def _is_malicious_chunk(text: str) -> bool:
+    """
+    Return True when *text* appears to contain a prompt-injection attempt.
+    Checks performed:
+      1. Invisible / zero-width characters
+      2. Direct injection phrases
+      3. Shell / OS commands
+      4. Base64-encoded injection phrases or shell commands
+      5. Leetspeak-obfuscated injection phrases
+    """
+    # 1. Invisible characters
+    if _INVISIBLE_CHARS_RE.search(text):
+        logger.warning("Prompt-injection guard: invisible characters detected in chunk.")
+        return True
+
+    # 2. Direct injection phrases
+    if _INJECTION_PHRASES_RE.search(text):
+        logger.warning("Prompt-injection guard: injection phrase detected in chunk.")
+        return True
+
+    # 3. Shell commands
+    if _SHELL_CMD_RE.search(text):
+        logger.warning("Prompt-injection guard: shell command pattern detected in chunk.")
+        return True
+
+    # 4. Base64-encoded payloads
+    for decoded in _extract_base64_strings(text):
+        if _INJECTION_PHRASES_RE.search(decoded) or _SHELL_CMD_RE.search(decoded):
+            logger.warning(
+                "Prompt-injection guard: base64-encoded malicious content detected in chunk."
+            )
+            return True
+
+    # 5. Leetspeak obfuscation
+    leet_decoded = _decode_leet(text)
+    if _INJECTION_PHRASES_RE.search(leet_decoded):
+        logger.warning("Prompt-injection guard: leetspeak-obfuscated injection detected in chunk.")
+        return True
+
+    return False
+
+
+def _sanitize_chunk(doc: Document) -> Document | None:
+    """
+    Return *None* if the document chunk is considered malicious,
+    otherwise return the chunk with invisible characters stripped.
+    """
+    text = doc.page_content
+    if _is_malicious_chunk(text):
+        return None
+    # Strip invisible characters even from benign chunks
+    clean_text = _INVISIBLE_CHARS_RE.sub("", text)
+    if clean_text != text:
+        doc = Document(page_content=clean_text, metadata=doc.metadata)
+    return doc
+
+
+# ---------------------------------------------------------------------------
 
 async def process_files(
     storage: StorageBase, skip_file_error: bool, **processor_kwargs: dict[str, Any]
@@ -69,7 +314,21 @@ async def process_files(
                 logger.debug(f"processing {file} using class {processor_cls.__name__}")
                 processor = processor_cls(**processor_kwargs)
                 docs = await processor.process_file(file)
-                knowledge.extend(docs.chunks)
+                sanitized_chunks = []
+                for chunk in docs.chunks:
+                    clean_content = sanitize_leetspeak(chunk.page_content)
+                    if clean_content != chunk.page_content:
+                        logger.warning(
+                            "Leetspeak-obfuscated prompt detected and removed "
+                            "in chunk from file %s",
+                            file,
+                        )
+                        chunk = Document(
+                            page_content=clean_content,
+                            metadata=chunk.metadata,
+                        )
+                    sanitized_chunks.append(chunk)
+                knowledge.extend(sanitized_chunks)
             else:
                 logger.error(f"can't find processor for {file}")
                 if skip_file_error:
@@ -178,9 +437,9 @@ class Brain:
 
         # Load Embedder
         if bserialized.embedding_config.embedder_type == "openai_embedding":
-            from langchain_openai import OpenAIEmbeddings
+            from langchain_openai import OpenAIEmbeddings  # GPAI integration; see MODEL_CARD_URL
 
-            embedder = OpenAIEmbeddings(**bserialized.embedding_config.config)
+            embedder = OpenAIEmbeddings(**bserialized.embedding_config.config)  # model card: MODEL_CARD_URL
         else:
             raise ValueError("unknown embedder")
 
@@ -494,6 +753,48 @@ class Brain:
         # add it to vectorstore
         raise NotImplementedError
 
+    # ---------------------------------------------------------------------------
+    # Prompt-injection guardrail
+    # ---------------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_prompt_injection(value: str, field_name: str = "input") -> str:
+        """Raise ValueError if *value* looks like a prompt-injection attempt.
+
+        Checks for the most common injection patterns (ignore/override/forget
+        previous instructions, role-switching directives, jailbreak markers).
+        Extend the pattern list as new attack vectors are discovered.
+        """
+        import re
+
+        _INJECTION_PATTERNS = [
+            r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
+            r"disregard\s+(all\s+)?(previous|prior|above)\s+instructions?",
+            r"forget\s+(all\s+)?(previous|prior|above)\s+instructions?",
+            r"override\s+(all\s+)?(previous|prior|above)\s+instructions?",
+            r"you\s+are\s+now\s+(a|an|the)\b",
+            r"act\s+as\s+(a|an|the)\b",
+            r"pretend\s+(you\s+are|to\s+be)\b",
+            r"do\s+not\s+follow\s+(your\s+)?(previous|prior|original)\s+instructions?",
+            r"system\s*:\s*you\s+are",
+            r"<\s*system\s*>",
+            r"\[\s*system\s*\]",
+            r"###\s*instruction",
+            r"jailbreak",
+            r"dan\s+mode",
+            r"developer\s+mode",
+        ]
+
+        lowered = value.lower()
+        for pattern in _INJECTION_PATTERNS:
+            if re.search(pattern, lowered):
+                raise ValueError(
+                    f"Prompt injection detected in '{field_name}': "
+                    f"input blocked by security guardrail."
+                )
+        return value
+
+    # ---------------------------------------------------------------------------
+
     async def ask_streaming(
         self,
         question: str,
@@ -522,6 +823,12 @@ class Brain:
             print(chunk.answer)
         ```
         """
+        # --- Prompt-injection guardrail ---
+        question = self._sanitize_prompt_injection(question, "question")
+        if system_prompt is not None:
+            system_prompt = self._sanitize_prompt_injection(system_prompt, "system_prompt")
+        # --- End guardrail ---
+
         llm = self.llm
 
         # If you passed a different llm model we'll override the brain  one
@@ -555,6 +862,13 @@ class Brain:
             metadata=metadata,
             **input_kwargs,
         ):
+            # Sanitize LLM output to remove dynamic code execution primitives
+            sanitized_answer = sanitize_llm_output(response.answer)
+            response = ParsedRAGChunkResponse(
+                answer=sanitized_answer,
+                metadata=response.metadata,
+                last_chunk=response.last_chunk,
+            )
             # Format output to be correct servicedf;j
             if not response.last_chunk:
                 yield response
@@ -605,7 +919,7 @@ class Brain:
             if response.metadata:
                 metadata = response.metadata
 
-        return ParsedRAGResponse(answer=full_answer, metadata=metadata)
+        return ParsedRAGResponse(answer=sanitize_llm_output(full_answer), metadata=metadata)
 
     def ask(
         self,
@@ -629,8 +943,16 @@ class Brain:
         Returns:
             ParsedRAGResponse: The generated answer.
         """
+        logger.info(
+            "LLM request (sync)",
+            extra={
+                "run_id": str(run_id),
+                "question": question,
+                "system_prompt": system_prompt,
+            },
+        )
         loop = asyncio.get_event_loop()
-        return loop.run_until_complete(
+        response = loop.run_until_complete(
             self.aask(
                 run_id=run_id,
                 question=question,
@@ -641,3 +963,12 @@ class Brain:
                 chat_history=chat_history,
             )
         )
+        logger.info(
+            "LLM response (sync)",
+            extra={
+                "run_id": str(run_id),
+                "answer": response.answer,
+                "metadata": str(response.metadata),
+            },
+        )
+        return response

@@ -17,6 +17,10 @@ from typing import (
 from uuid import UUID, uuid4
 
 import openai
+
+# MODEL_CARD_URL references the official OpenAI model documentation used in this module.
+# See: https://openai.com/research/ for model cards and technical details.
+MODEL_CARD_URL = "https://openai.com/research/"  # Update to the specific model card URL before deployment.
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain_cohere import CohereRerank
 from langchain_community.document_compressors import JinaRerank
@@ -33,7 +37,7 @@ from langgraph.graph.message import add_messages
 from langgraph.types import Send
 from pydantic import BaseModel, Field
 
-from quivr_core.llm import LLMEndpoint
+from langchain_core.language_models import BaseChatModel
 from quivr_core.llm_tools.llm_tools import LLMToolFactory
 from quivr_core.rag.entities.chat import ChatHistory
 from quivr_core.rag.entities.config import DefaultRerankers, NodeConfig, RetrievalConfig
@@ -258,7 +262,7 @@ class QuivrQARAGLangGraph:
         self,
         *,
         retrieval_config: RetrievalConfig,
-        llm: LLMEndpoint,
+        llm: BaseChatModel,
         vector_store: VectorStore | None = None,
     ):
         """
@@ -266,7 +270,7 @@ class QuivrQARAGLangGraph:
 
         Args:
             retrieval_config (RetrievalConfig): The configuration for the RAG model.
-            llm (LLMEndpoint): The LLM to use for generating text.
+            llm (BaseChatModel): The LLM to use for generating text.
             vector_store (VectorStore): The vector store to use for storing and retrieving documents.
             reranker (BaseDocumentCompressor | None): The document compressor to use for re-ranking documents. Defaults to IdempotentCompressor if not provided.
         """
@@ -920,11 +924,32 @@ class QuivrQARAGLangGraph:
                 return self.llm_endpoint._llm.bind_tools(tools, tool_choice="any")
         return self.llm_endpoint._llm
 
+    @staticmethod
+    def _sanitize_user_input(text: str) -> str:
+        """Detect and block prompt injection attempts in user-supplied content."""
+        import re
+        injection_patterns = [
+            r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"(?i)disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"(?i)forget\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are))\s+.{0,100}",
+            r"(?i)(system\s*:|<\s*system\s*>|\[\s*system\s*\])",
+            r"(?i)(new\s+instructions?|override\s+instructions?|updated\s+instructions?)",
+            r"(?i)jailbreak",
+            r"(?i)(do\s+anything\s+now|DAN\b)",
+        ]
+        for pattern in injection_patterns:
+            if re.search(pattern, text):
+                raise ValueError(
+                    f"Prompt injection attempt detected and blocked in user input."
+                )
+        return text
+
     def generate_zendesk_rag(self, state: AgentState) -> AgentState:
         tasks = state["tasks"]
         docs: List[Document] = tasks.docs if tasks else []
         messages = state["messages"]
-        user_task = messages[0].content
+        user_task = self._sanitize_user_input(str(messages[0].content))
         prompt_template: BasePromptTemplate = custom_prompts[
             TemplatePromptName.ZENDESK_TEMPLATE_PROMPT
         ]
@@ -1077,8 +1102,8 @@ class QuivrQARAGLangGraph:
         """
         Answer a question using the langgraph chain and yield each chunk of the answer separately.
         """
-        concat_list_files = format_file_list(
-            list_files, self.retrieval_config.max_files
+        concat_list_files = self._sanitize_user_input(
+            format_file_list(list_files, self.retrieval_config.max_files)
         )
         conversational_qa_chain = self.build_chain()
 
@@ -1179,10 +1204,67 @@ class QuivrQARAGLangGraph:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 output_class, method="json_schema"
             )
-            return await structured_llm.ainvoke(prompt)
+            return self._sanitize_llm_output(await structured_llm.ainvoke(prompt))
         except openai.BadRequestError:
             structured_llm = self.llm_endpoint._llm.with_structured_output(output_class)
-            return await structured_llm.ainvoke(prompt)
+            return self._sanitize_llm_output(await structured_llm.ainvoke(prompt))
+
+    # Dangerous dynamic code execution primitives to detect and remove
+    _DANGEROUS_PATTERNS = [
+        r"\beval\s*\(",                        # Python/JS eval(
+        r"\bexec\s*\(",                        # Python exec(
+        r"\bexecfile\s*\(",                    # Python 2 execfile(
+        r"\bcompile\s*\(",                     # Python compile(
+        r"\b__import__\s*\(",                  # Python __import__(
+        r"\bimportlib\.import_module\s*\(",    # importlib dynamic import
+        r"subprocess\..*shell\s*=\s*True",     # subprocess shell=True
+        r"\bos\.system\s*\(",                  # os.system(
+        r"\bos\.popen\s*\(",                   # os.popen(
+        r"\bpopen\s*\(",                       # popen(
+        r"\beval\b",                           # bare eval keyword
+        r"`[^`]*`",                            # bash backtick execution
+        r"\$\([^)]*\)",                        # bash $() execution
+        r"\bFunction\s*\(",                    # JS new Function(
+        r"\bsetTimeout\s*\(\s*['\"][^'\"]*['\"",  # JS setTimeout with string
+        r"\bsetInterval\s*\(\s*['\"][^'\"]*['\"",  # JS setInterval with string
+    ]
+
+    def _sanitize_llm_output(self, response: Any) -> Any:
+        """
+        Sanitize LLM output by removing lines containing dangerous dynamic
+        code execution primitives such as eval, exec, subprocess(shell=True),
+        JS eval, bash eval, etc.
+
+        Args:
+            response: The raw LLM response (BaseModel instance or string).
+
+        Returns:
+            The sanitized response with dangerous lines removed.
+        """
+        import re
+
+        def _clean_text(text: str) -> str:
+            lines = text.splitlines()
+            safe_lines = [
+                line for line in lines
+                if not any(
+                    re.search(pattern, line)
+                    for pattern in self._DANGEROUS_PATTERNS
+                )
+            ]
+            return "\n".join(safe_lines)
+
+        if isinstance(response, str):
+            return _clean_text(response)
+
+        if isinstance(response, BaseModel):
+            for field_name, field_value in response:
+                if isinstance(field_value, str):
+                    sanitized = _clean_text(field_value)
+                    object.__setattr__(response, field_name, sanitized)
+            return response
+
+        return response
 
     def invoke_structured_output(
         self, prompt: str, output_class: Type[BaseModel]
@@ -1191,10 +1273,203 @@ class QuivrQARAGLangGraph:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 output_class, method="json_schema"
             )
-            return structured_llm.invoke(prompt)
+            return self._sanitize_llm_output(structured_llm.invoke(prompt))
         except openai.BadRequestError:
             structured_llm = self.llm_endpoint._llm.with_structured_output(output_class)
-            return structured_llm.invoke(prompt)
+            return self._sanitize_llm_output(structured_llm.invoke(prompt))
+
+    @staticmethod
+    def _sanitize_retrieved_content(text: str) -> str:
+        """Remove hidden or invisible prompt injections from retrieved RAG content."""
+        import re
+        # Remove zero-width and other invisible Unicode characters
+        invisible_chars = (
+            "\u200b\u200c\u200d\u200e\u200f"
+            "\u00ad\u2060\u2061\u2062\u2063\u2064"
+            "\ufeff\u180e\u00a0"
+        )
+        pattern_invisible = "[" + re.escape(invisible_chars) + "]"
+        text = re.sub(pattern_invisible, "<hidden_prompts_removed>", text)
+        # Remove HTML/CSS-based hidden text patterns (e.g. color:white, font-size:0)
+        text = re.sub(
+            r'<[^>]*(?:color\s*:\s*white|font-size\s*:\s*0)[^>]*>.*?</[^>]+>',
+            "<hidden_prompts_removed>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        # Remove inline style hidden text
+        text = re.sub(
+            r'style\s*=\s*["\'][^"\'>]*(?:color\s*:\s*white|font-size\s*:\s*0)[^"\'>]*["\']',
+            "<hidden_prompts_removed>",
+            text,
+            flags=re.IGNORECASE,
+        )
+        # Remove common prompt-injection patterns in retrieved content
+        text = re.sub(
+            r'(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?)',
+            "<hidden_prompts_removed>",
+            text,
+        )
+        return text
+
+    @staticmethod
+    def _sanitize_file_content(content: str) -> str:
+        """Scan and neutralize prompt injection patterns in untrusted file content.
+
+        Detects and strips:
+        - Hidden/injected instruction patterns (e.g. "ignore previous", "system:", "<|im_start|>")
+        - Base64-encoded payloads that decode to suspicious text
+        - Shell command patterns
+        - Leetspeak obfuscation of known injection keywords
+        """
+        import re
+        import base64
+
+        if not content or content == "None":
+            return content
+
+        # --- 1. Detect and neutralise explicit injection phrases ---
+        injection_patterns = [
+            r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"forget\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"you\s+are\s+now\s+(?:a|an|the)\b",
+            r"act\s+as\s+(?:a|an|the)\b",
+            r"new\s+instructions?\s*:",
+            r"system\s*:",
+            r"assistant\s*:",
+            r"<\|im_start\|>",
+            r"<\|im_end\|>",
+            r"\[INST\]",
+            r"\[/INST\]",
+            r"<<SYS>>",
+            r"<</SYS>>",
+            r"###\s*instruction",
+            r"###\s*system",
+            r"###\s*prompt",
+            r"jailbreak",
+            r"do\s+anything\s+now",
+            r"dan\s+mode",
+        ]
+        for pattern in injection_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                content = re.sub(
+                    pattern,
+                    "[REDACTED]",
+                    content,
+                    flags=re.IGNORECASE,
+                )
+
+        # --- 2. Detect shell command patterns ---
+        shell_patterns = [
+            r"(?:^|\s)(?:sudo|rm\s+-rf|chmod|chown|wget|curl|bash|sh|python|perl|ruby|nc|ncat|netcat)\s",
+            r"`[^`]+`",          # backtick command substitution
+            r"\$\([^)]+\)",      # $(command) substitution
+            r";\s*(?:rm|wget|curl|bash|sh)\s",
+        ]
+        for pattern in shell_patterns:
+            if re.search(pattern, content, re.IGNORECASE | re.MULTILINE):
+                content = re.sub(
+                    pattern,
+                    " [REDACTED] ",
+                    content,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+
+        # --- 3. Detect and decode base64 payloads ---
+        b64_pattern = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+        suspicious_decoded_patterns = re.compile(
+            r"ignore|system|instruction|jailbreak|prompt|assistant|act as",
+            re.IGNORECASE,
+        )
+        def _redact_b64(match: re.Match) -> str:
+            candidate = match.group(0)
+            try:
+                # Pad to a valid length
+                padded = candidate + "=" * (-len(candidate) % 4)
+                decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+                if suspicious_decoded_patterns.search(decoded):
+                    return "[REDACTED_BASE64]"
+            except Exception:
+                pass
+            return candidate
+        content = b64_pattern.sub(_redact_b64, content)
+
+        # --- 4. Detect leetspeak obfuscation of injection keywords ---
+        leet_map = str.maketrans("013456789", "oieashbpg")
+        leet_decoded = content.translate(leet_map)
+        leet_injection_patterns = [
+            r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)",
+            r"act\s+as\s+(?:a|an|the)\b",
+            r"jailbreak",
+            r"do\s+anything\s+now",
+        ]
+        for pattern in leet_injection_patterns:
+            if re.search(pattern, leet_decoded, re.IGNORECASE):
+                # Redact the original span by matching positionally
+                for m in re.finditer(pattern, leet_decoded, re.IGNORECASE):
+                    content = content[: m.start()] + "[REDACTED]" + content[m.end() :]
+                    leet_decoded = leet_decoded[: m.start()] + "[REDACTED]" + leet_decoded[m.end() :]
+
+        return content
+
+    # Patterns that indicate potential prompt injection attempts
+    _INJECTION_PATTERNS = [
+        r"(?i)(ignore\s+(previous|above|prior|all)\s+(instructions?|prompts?|context))",
+        r"(?i)(system\s*:\s*|assistant\s*:\s*|user\s*:\s*)",
+        r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|roleplay\s+as)",
+        r"(?i)(disregard|forget|override|bypass|jailbreak)",
+        r"(?i)(new\s+instructions?|updated\s+instructions?|revised\s+instructions?)",
+        r"<\s*(system|assistant|user|instructions?|prompt)\s*>",
+        r"\[\s*(system|assistant|user|instructions?|INST)\s*\]",
+        r"###\s*(system|assistant|user|instructions?)",
+    ]
+
+    @classmethod
+    def _sanitize_user_input(cls, value: str, field_name: str) -> str:
+        """Sanitize user-supplied input to prevent prompt injection.
+
+        Checks the value against known injection patterns, logs any matches,
+        and escapes or strips dangerous sequences before returning a safe value
+        wrapped in structural XML delimiters.
+
+        Args:
+            value: The raw user-supplied string.
+            field_name: A label used in log messages to identify the field.
+
+        Returns:
+            The sanitized string wrapped in XML delimiters.
+
+        Raises:
+            ValueError: If the input contains injection patterns that cannot
+                be safely escaped.
+        """
+        import re
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        for pattern in cls._INJECTION_PATTERNS:
+            if re.search(pattern, value):
+                logger.warning(
+                    "Potential prompt injection detected in field '%s'. "
+                    "Pattern matched: %s. Input blocked.",
+                    field_name,
+                    pattern,
+                )
+                raise ValueError(
+                    f"Input for field '{field_name}' contains disallowed "
+                    "instruction-like patterns and has been rejected."
+                )
+
+        # Escape XML special characters so the delimiters cannot be broken out of
+        escaped = (
+            value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        return f"<user_data field=\"{field_name}\">\n{escaped}\n</user_data>"
 
     def _build_rag_prompt_inputs(
         self, state: AgentState, docs: List[Document] | None
@@ -1209,17 +1484,26 @@ class QuivrQARAGLangGraph:
             Dictionary containing all inputs needed for RAG_ANSWER_PROMPT
         """
         messages = state["messages"]
-        user_task = messages[0].content
-        files = state["files"]
+        raw_user_task = messages[0].content
+        raw_files = state["files"]
         prompt = self.retrieval_config.prompt
         # available_tools, _ = collect_tools(self.retrieval_config.workflow_config)
 
+        # Sanitize untrusted user-supplied values and wrap them in structural
+        # delimiters so the model can clearly distinguish instructions from data.
+        sanitized_task = self._sanitize_user_input(
+            str(raw_user_task) if raw_user_task else "", "task"
+        )
+        sanitized_files = self._sanitize_user_input(
+            str(raw_files) if raw_files else "None", "files"
+        )
+
         return {
             "context": combine_documents(docs) if docs else "None",
-            "task": user_task,
+            "task": sanitized_task,
             "rephrased_task": state["tasks"].definitions if state["tasks"] else "None",
             "custom_instructions": prompt if prompt else "None",
-            "files": files if files else "None",
+            "files": sanitized_files,
             "chat_history": state["chat_history"].to_list(),
             # "reasoning": state["reasoning"] if "reasoning" in state else "None",
             # "tools": available_tools,

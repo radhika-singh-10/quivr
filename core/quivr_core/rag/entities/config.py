@@ -20,6 +20,20 @@ logger = logging.getLogger("quivr_core")
 MIN_CONTEXT_TOKENS = 4096
 MIN_OUTPUT_TOKENS = 4096
 
+# Model card / technical documentation URLs for each GPAI model supplier.
+# These must be reviewed and confirmed before deployment.
+# TODO: Replace any placeholder URLs with the exact model card URL for the
+#       specific model version being used.
+MODEL_CARD_URLS: dict = {
+    "openai": "https://openai.com/research/",        # OpenAI model cards & research
+    "azure": "https://openai.com/research/",         # Azure OpenAI uses OpenAI models
+    "anthropic": "https://www.anthropic.com/research",  # Anthropic model cards
+    "meta": "https://ai.meta.com/research/",         # Meta LLaMA model cards
+    "mistral": "https://mistral.ai/technology/",     # Mistral model documentation
+    "groq": "https://groq.com/",                     # TODO: replace with exact model card URL
+    "gemini": "https://ai.google.dev/gemini-api/docs",  # Google Gemini technical docs
+}
+
 
 def normalize_to_env_variable_name(name: str) -> str:
     # Replace any character that is not a letter, digit, or underscore with an underscore
@@ -84,6 +98,9 @@ class LLMConfig(QuivrBaseConfig):
 
 
 class LLMModelConfig:
+    # Model card / technical documentation references for all supported GPAI suppliers
+    # are defined in MODULE_CARD_URLS at module level (see MODEL_CARD_URLS above).
+    # Auditors: verify each supplier entry in MODEL_CARD_URLS before deployment.
     _model_defaults: Dict[DefaultModelSuppliers, Dict[str, LLMConfig]] = {
         DefaultModelSuppliers.OPENAI: {
             "gpt-4.1": LLMConfig(
