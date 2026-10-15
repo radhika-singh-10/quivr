@@ -1,3 +1,23 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+# Each enforce() call site below carries a SiteDescriptor with:
+#   site_id            deterministic id for this exact call site (file +
+#                      symbol + insertion point + pattern) — stable across
+#                      re-scans, used to dedupe stub insertions and to look
+#                      up this site's policy mapping at runtime.
+#   candidate_policies policy IDs this site matched during the scan.
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 from uuid import uuid4
 
 import pytest
@@ -11,7 +31,12 @@ from quivr_core.rag.utils import (
 
 
 def test_model_supports_function_calling():
-    assert model_supports_function_calling("gpt-4") is True
+    _lineaje_payload = "gpt-4"
+    # LINEAJE: enforce() `_lineaje_payload` at user_interface->tool pre_tool — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.). Mask/block; do not remove without review. site_id='site:sha256:aac8a69f1277be9d19d086c7f935398a933b2a5188e10a75dc539dc620daca04'
+    _gr_client = _lineaje_load_gr_client()
+    _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:aac8a69f1277be9d19d086c7f935398a933b2a5188e10a75dc539dc620daca04', phase='pre_tool', boundary={'source': 'user_interface', 'sink': 'tool_result'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}], fail_mode='ALLOW_WITH_AUDIT', source_type='user_interface', destination_type='tool')
+    _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=14)
+    assert model_supports_function_calling(_lineaje_payload) is True
     assert model_supports_function_calling("ollama3") is False
 
 

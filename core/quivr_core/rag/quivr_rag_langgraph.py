@@ -1,3 +1,23 @@
+# Copyright (c) Lineaje, Inc. All rights reserved.
+# Lineaje UnifAI guardrail  version=2.0.0-alpha
+# Each enforce() call site below carries a SiteDescriptor with:
+#   site_id            deterministic id for this exact call site (file +
+#                      symbol + insertion point + pattern) — stable across
+#                      re-scans, used to dedupe stub insertions and to look
+#                      up this site's policy mapping at runtime.
+#   candidate_policies policy IDs this site matched during the scan.
+def _lineaje_load_gr_client():
+    """Lineaje-added: load gr_stub_client.py without a pip dependency."""
+    import sys as _s, importlib.util as _ilu
+    from pathlib import Path as _P
+    n = "_lineaje_gr_stub_client"
+    if n in _s.modules: return _s.modules[n]
+    h = _P(__file__).resolve().parent
+    _cand = next((d / "gr_stub_client.py" for d in [h, *h.parents][:8] if (d / "gr_stub_client.py").is_file()), h / "gr_stub_client.py")
+    _spec = _ilu.spec_from_file_location(n, _cand)
+    _s.modules[n] = _m = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_m); return _m
+
 import asyncio
 import datetime
 import logging
@@ -250,6 +270,10 @@ class IdempotentCompressor(BaseDocumentCompressor):
         This is a placeholder until a more sophisticated document compression
         algorithm is implemented.
         """
+        # LINEAJE: enforce() `documents` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:58dba1272b49cd57d0b75c28159382429c9783c3c5f11e9400f0832aced37ebd'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:58dba1272b49cd57d0b75c28159382429c9783c3c5f11e9400f0832aced37ebd', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        documents = _gr_client.enforce(_gr_site, documents, content_type='text/plain')
         return documents
 
 
@@ -297,6 +321,10 @@ class QuivrQARAGLangGraph:
         else:
             reranker = IdempotentCompressor()
 
+        # LINEAJE: enforce() `reranker` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:fde5b8ea8a60267f793eb0e8f128c75267a7dc49fad6a7274412fd87c918ef06'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:fde5b8ea8a60267f793eb0e8f128c75267a7dc49fad6a7274412fd87c918ef06', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        reranker = _gr_client.enforce(_gr_site, reranker, content_type='text/plain')
         return reranker
 
     def get_retriever(self, **kwargs):
@@ -311,6 +339,10 @@ class QuivrQARAGLangGraph:
         else:
             raise ValueError("No vector store provided")
 
+        # LINEAJE: enforce() `retriever` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:ee79f756df9f238be476ac17c0a10830c57bd2d9911d2b730c9c40b70856c2a6'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:ee79f756df9f238be476ac17c0a10830c57bd2d9911d2b730c9c40b70856c2a6', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        retriever = _gr_client.enforce(_gr_site, retriever, content_type='text/plain')
         return retriever
 
     def routing(self, state: AgentState) -> List[Send]:
@@ -334,12 +366,20 @@ class QuivrQARAGLangGraph:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 SplittedInput, method="json_schema"
             )
+            # LINEAJE: enforce() `msg` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:0d4a8228f9b53d8c3d8bea4f7b07979d3311ebca3acf97b7ab801f8508502c0b'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0d4a8228f9b53d8c3d8bea4f7b07979d3311ebca3acf97b7ab801f8508502c0b', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+            msg = _gr_client.enforce(_gr_site, msg, content_type='application/json', variable_name='msg', source_file=__file__, before_line=337)
             response = structured_llm.invoke(msg)
 
         except openai.BadRequestError:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 SplittedInput
             )
+            # LINEAJE: enforce() `msg` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:11b68616426fe15f3c5d108c5f6c4b56918f5ce28a3d80d3a245e9280af83dc3'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:11b68616426fe15f3c5d108c5f6c4b56918f5ce28a3d80d3a245e9280af83dc3', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+            msg = _gr_client.enforce(_gr_site, msg, content_type='application/json', variable_name='msg', source_file=__file__, before_line=343)
             response = structured_llm.invoke(msg)
 
         send_list: List[Send] = []
@@ -364,6 +404,10 @@ class QuivrQARAGLangGraph:
                 )
             )
 
+        # LINEAJE: enforce() `send_list` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:71d0ae9e91d666610108a3ecd5527edc1eed884294ff4dc07c2b5ab6d05ea8bc'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:71d0ae9e91d666610108a3ecd5527edc1eed884294ff4dc07c2b5ab6d05ea8bc', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        send_list = _gr_client.enforce(_gr_site, send_list, content_type='text/plain')
         return send_list
 
     def routing_split(self, state: AgentState):
@@ -525,13 +569,22 @@ class QuivrQARAGLangGraph:
         )
 
         if relevance_score_threshold is None:
+            # LINEAJE: enforce() `chunks` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:47b73da74fb8498a8cbc754a31025541f24e12a71ccd3511ab213b9d5363e151'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:47b73da74fb8498a8cbc754a31025541f24e12a71ccd3511ab213b9d5363e151', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+            chunks = _gr_client.enforce(_gr_site, chunks, content_type='text/plain')
             return chunks
 
         filtered_chunks = []
         for chunk in chunks:
             if config.relevance_score_key not in chunk.metadata:
+                _lineaje_payload = f"Relevance score key {config.relevance_score_key} not found in metadata, cannot filter chunks by relevance"
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:0300eea5637c93444dc88251be43b5e77c5afbfacb58b438e0df0fea07d891c4'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:0300eea5637c93444dc88251be43b5e77c5afbfacb58b438e0df0fea07d891c4', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
                 logger.warning(
-                    f"Relevance score key {config.relevance_score_key} not found in metadata, cannot filter chunks by relevance"
+                    _lineaje_payload
                 )
                 filtered_chunks.append(chunk)
             elif (
@@ -539,6 +592,10 @@ class QuivrQARAGLangGraph:
             ):
                 filtered_chunks.append(chunk)
 
+        # LINEAJE: enforce() `filtered_chunks` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:56f6bc28f9acb5b97e2dd6dd97769ba3b42afc8a1c9e1e7fcde6bc640d47f276'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:56f6bc28f9acb5b97e2dd6dd97769ba3b42afc8a1c9e1e7fcde6bc640d47f276', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        filtered_chunks = _gr_client.enforce(_gr_site, filtered_chunks, content_type='text/plain')
         return filtered_chunks
 
     async def tool_routing(self, state: AgentState):
@@ -583,6 +640,10 @@ class QuivrQARAGLangGraph:
         else:
             send_list.append(Send("generate_rag", payload))
 
+        # LINEAJE: enforce() `send_list` at agent->user_interface data_egress — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:36d08a9b6f61f005406ce8e2fccf6df6e10930cbcc6e3a57b62faf4699df7343'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:36d08a9b6f61f005406ce8e2fccf6df6e10930cbcc6e3a57b62faf4699df7343', phase='data_egress', boundary={'source': 'agent_message', 'sink': 'user_interface'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_012', 'guardrail_id': 'Mask PII on UI', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='user_interface')
+        send_list = _gr_client.enforce(_gr_site, send_list, content_type='text/plain')
         return send_list
 
     async def run_tool(self, state: AgentState) -> AgentState:
@@ -711,8 +772,13 @@ class QuivrQARAGLangGraph:
             base_retriever = self.get_retriever(**kwargs)
 
             if i > 1:
+                _lineaje_payload = f"Increasing top_n to {top_n} and k to {k} to retrieve more relevant chunks"
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:b4f3afcade4c9d6ecef363ed1d5f34c369e2e228f00dfe77dc60c3030e309e8d'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:b4f3afcade4c9d6ecef363ed1d5f34c369e2e228f00dfe77dc60c3030e309e8d', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json'))
                 logging.info(
-                    f"Increasing top_n to {top_n} and k to {k} to retrieve more relevant chunks"
+                    _lineaje_payload
                 )
 
             compression_retriever = ContextualCompressionRetriever(
@@ -747,9 +813,14 @@ class QuivrQARAGLangGraph:
 
             context_length = self.get_rag_context_length(state, docs)
             if context_length >= self.retrieval_config.llm_config.max_context_tokens:
+                _lineaje_payload = (f"The context length is {context_length} which is greater than "
+                    f"the max context tokens of {self.retrieval_config.llm_config.max_context_tokens}")
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:a1d0e957d35878b96c99a8dfe42ba84ca10cc74e84afaa6b30d8fff1a298ca58'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:a1d0e957d35878b96c99a8dfe42ba84ca10cc74e84afaa6b30d8fff1a298ca58', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json'))
                 logging.warning(
-                    f"The context length is {context_length} which is greater than "
-                    f"the max context tokens of {self.retrieval_config.llm_config.max_context_tokens}"
+                    _lineaje_payload
                 )
                 break
 
@@ -812,7 +883,12 @@ class QuivrQARAGLangGraph:
             )[:top_n]
         )
 
-        logger.info(f"Top knowledge IDs: {top_knowledge_ids}")
+        _lineaje_payload = f"Top knowledge IDs: {top_knowledge_ids}"
+        # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:68da78994b82bd5ee5f3d86b3f93cbf138199c430182672f66293e2344af5b43'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:68da78994b82bd5ee5f3d86b3f93cbf138199c430182672f66293e2344af5b43', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+        _lineaje_payload = await __import__('asyncio').to_thread(lambda: _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json'))
+        logger.info(_lineaje_payload)
 
         _docs = []
 
@@ -892,9 +968,14 @@ class QuivrQARAGLangGraph:
                     task_token_counts[longest_task_id]["total"] -= removed_tokens
                     tasks.set_docs(longest_task_id, tasks(longest_task_id).docs[:-1])
             else:
+                _lineaje_payload = (f"Not enough context to reduce. The context length is {n} "
+                    f"which is greater than the max context tokens of {max_context_tokens}")
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:7d61ffcea9ce191a08dca54a978266822907119a04e548fcf8300d8b34ef1c75'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:7d61ffcea9ce191a08dca54a978266822907119a04e548fcf8300d8b34ef1c75', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
                 logging.warning(
-                    f"Not enough context to reduce. The context length is {n} "
-                    f"which is greater than the max context tokens of {max_context_tokens}"
+                    _lineaje_payload
                 )
                 break
 
@@ -906,8 +987,13 @@ class QuivrQARAGLangGraph:
 
             iteration += 1
             if iteration > MAX_ITERATIONS:
+                _lineaje_payload = f"Attained the maximum number of iterations ({MAX_ITERATIONS})"
+                # LINEAJE: enforce() `_lineaje_payload` at agent->log log_emit — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:1a46d1f0d2283a98e1cd37f551d3a7345cb63645221449eead8d974ecb5c1310'
+                _gr_client = _lineaje_load_gr_client()
+                _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:1a46d1f0d2283a98e1cd37f551d3a7345cb63645221449eead8d974ecb5c1310', phase='log_emit', boundary={'source': 'log', 'sink': 'log'}, candidate_policies=[{'policy_id': 'AI_DAT_SEC_010', 'guardrail_id': 'Mask PII in Logs', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='log')
+                _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json')
                 logging.warning(
-                    f"Attained the maximum number of iterations ({MAX_ITERATIONS})"
+                    _lineaje_payload
                 )
                 break
 
@@ -949,6 +1035,10 @@ class QuivrQARAGLangGraph:
         msg = prompt_template.format_prompt(**inputs)
         llm = self.bind_tools_to_llm(self.generate_zendesk_rag.__name__)
 
+        # LINEAJE: enforce() `msg` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:27eb55300402f0bc08d9ab42158f1afe7379393f1d76fa161aaefc96220264b2'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:27eb55300402f0bc08d9ab42158f1afe7379393f1d76fa161aaefc96220264b2', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        msg = _gr_client.enforce(_gr_site, msg, content_type='application/json', variable_name='msg', source_file=__file__, before_line=952)
         response = llm.invoke(msg)
 
         return {**state, "messages": [response]}
@@ -961,6 +1051,10 @@ class QuivrQARAGLangGraph:
         state, inputs = self.reduce_rag_context(state, inputs, prompt)
         msg = prompt.format(**inputs)
         llm = self.bind_tools_to_llm(self.generate_rag.__name__)
+        # LINEAJE: enforce() `msg` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:6f310daf8d1fc35fa942643f396e0dd6ffdb12987f30437d40733f8b764b3046'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:6f310daf8d1fc35fa942643f396e0dd6ffdb12987f30437d40733f8b764b3046', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        msg = _gr_client.enforce(_gr_site, msg, content_type='application/json', variable_name='msg', source_file=__file__, before_line=964)
         response = llm.invoke(msg)
 
         return {**state, "messages": [response]}
@@ -1014,9 +1108,18 @@ class QuivrQARAGLangGraph:
             ]
         )
         # Run
+        _lineaje_payload = {"chat_history": final_inputs["chat_history"]}
+        # LINEAJE: enforce() `_lineaje_payload` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:aba415e6d06f0a76401670fcb9060bae7d4debea3d7618a59e4296b2fcf4d495'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:aba415e6d06f0a76401670fcb9060bae7d4debea3d7618a59e4296b2fcf4d495', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        _lineaje_payload = _gr_client.enforce(_gr_site, _lineaje_payload, content_type='application/json', variable_name='_lineaje_payload', source_file=__file__, before_line=1017)
         chat_llm_prompt = CHAT_LLM_PROMPT.invoke(
-            {"chat_history": final_inputs["chat_history"]}
+            _lineaje_payload
         )
+        # LINEAJE: enforce() `chat_llm_prompt` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:2791dfe3c21a8dab118acea2ac667242c7296ca8cce0ab01c8e6d7288d46620b'
+        _gr_client = _lineaje_load_gr_client()
+        _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:2791dfe3c21a8dab118acea2ac667242c7296ca8cce0ab01c8e6d7288d46620b', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+        chat_llm_prompt = _gr_client.enforce(_gr_site, chat_llm_prompt, content_type='application/json', variable_name='chat_llm_prompt', source_file=__file__, before_line=1020)
         response = llm.invoke(chat_llm_prompt)
         return {**state, "messages": [response]}
 
@@ -1191,9 +1294,17 @@ class QuivrQARAGLangGraph:
             structured_llm = self.llm_endpoint._llm.with_structured_output(
                 output_class, method="json_schema"
             )
+            # LINEAJE: enforce() `prompt` at agent->llm pre_model — scan flagged AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.); AI_APP_SEC_039 (Sanitize and validate all input to the AI Model.). Mask/block; do not remove without review. site_id='site:sha256:94e66e40112a220834f5532fb9c6167ca6478126d0adbf5379657658b404b6be'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:94e66e40112a220834f5532fb9c6167ca6478126d0adbf5379657658b404b6be', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+            prompt = _gr_client.enforce(_gr_site, prompt, content_type='application/json', variable_name='prompt', source_file=__file__, before_line=1194)
             return structured_llm.invoke(prompt)
         except openai.BadRequestError:
             structured_llm = self.llm_endpoint._llm.with_structured_output(output_class)
+            # LINEAJE: enforce() `prompt` at agent->llm pre_model — scan flagged AI_APP_SEC_006 (Use only LLMs from the organization's approved list.); AI_APP_SEC_029 (Agent must validate, sanitize LLM output including for presence of eval or any dynamic code execution primitive in LLM output.); AI_APP_SEC_038 (The AI Model must validate and sanitize any input before processing.). Mask/block; do not remove without review. site_id='site:sha256:f4f0fd943ff72da53ae37cb37e098b5ac7e668fd61298066edfb51599b5962f6'
+            _gr_client = _lineaje_load_gr_client()
+            _gr_site = _gr_client.SiteDescriptor(site_id='site:sha256:f4f0fd943ff72da53ae37cb37e098b5ac7e668fd61298066edfb51599b5962f6', phase='pre_model', boundary={'source': 'agent_message', 'sink': 'model'}, candidate_policies=[{'policy_id': 'AI_APP_SEC_006', 'guardrail_id': 'Enforce Approved LLM.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_028', 'guardrail_id': 'Enforce Approved LLM', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_DAT_SEC_029', 'guardrail_id': 'Emit immutable, forensic-ready audit records for all AI decisions.', 'policy_version': '2026.08.1'}, {'policy_id': 'AI_APP_SEC_029', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_038', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_039', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_040', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_059', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_IAC_024', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_APP_SEC_080', 'guardrail_id': None, 'policy_version': None}, {'policy_id': 'AI_DAT_SEC_027', 'guardrail_id': 'Minimise and redact all outbound AI outputs.', 'policy_version': '2026.08.1'}], fail_mode='BLOCK', source_type='agent', destination_type='llm')
+            prompt = _gr_client.enforce(_gr_site, prompt, content_type='application/json', variable_name='prompt', source_file=__file__, before_line=1197)
             return structured_llm.invoke(prompt)
 
     def _build_rag_prompt_inputs(
