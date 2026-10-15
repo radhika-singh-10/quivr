@@ -9,6 +9,10 @@ from quivr_core.llm import LLMEndpoint
 
 logger = logging.getLogger("quivr_core")
 
+# Model card / technical documentation for the GPAI models used in this module.
+# Review this URL before deployment to ensure compliance with your AI usage policy.
+MODEL_CARD_URL = "https://openai.com/research/"  # OpenAI model documentation
+
 
 async def build_default_vectordb(
     docs: list[Document], embedder: Embeddings
@@ -35,6 +39,8 @@ def default_embedder() -> Embeddings:
         from langchain_openai import OpenAIEmbeddings
 
         logger.debug("Loaded OpenAIEmbeddings as default LLM for brain")
+        # GPAI model documentation: see MODEL_CARD_URL = MODEL_CARD_URL
+        logger.debug("OpenAIEmbeddings model card / technical docs: %s", MODEL_CARD_URL)
         embedder = OpenAIEmbeddings(check_embedding_ctx_length=False)
         return embedder
     except ImportError as e:
@@ -46,6 +52,8 @@ def default_embedder() -> Embeddings:
 def default_llm() -> LLMEndpoint:
     try:
         logger.debug("Loaded ChatOpenAI as default LLM for brain")
+        # GPAI model documentation: see MODEL_CARD_URL
+        logger.debug("LLMEndpoint (gpt-4o) model card / technical docs: %s", MODEL_CARD_URL)
         llm = LLMEndpoint.from_config(
             LLMEndpointConfig(supplier=DefaultModelSuppliers.OPENAI, model="gpt-4o")
         )

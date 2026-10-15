@@ -1,4 +1,5 @@
 import logging
+import re
 from operator import itemgetter
 from typing import AsyncGenerator, Optional, Sequence
 
@@ -13,6 +14,11 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_core.vectorstores import VectorStore
 
 from quivr_core.llm import LLMEndpoint
+
+# Organization-approved LLM models registry
+APPROVED_LLM_MODELS: set[str] = {
+    "quivr-approved-model",  # Replace with actual approved model identifiers
+}
 from quivr_core.rag.entities.chat import ChatHistory
 from quivr_core.rag.entities.config import RetrievalConfig
 from quivr_core.rag.entities.models import (
@@ -32,9 +38,149 @@ from quivr_core.rag.utils import (
     parse_response,
 )
 
+import re
+
+import re
+
 logger = logging.getLogger("quivr_core")
+
+
+def sanitize_input(text: str) -> str:
+    """
+    Sanitize user-supplied input to block common prompt injection patterns.
+    Raises ValueError if a clear injection attempt is detected; otherwise
+    strips suspicious directives and returns the cleaned text.
+    """
+    if not isinstance(text, str):
+        return text
+    # Patterns that indicate prompt injection attempts
+    injection_patterns = [
+        r"(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?)",
+        r"(?i)(disregard\s+(all\s+)?(previous|prior|above)\s+instructions?)",
+        r"(?i)(forget\s+(all\s+)?(previous|prior|above)\s+instructions?)",
+        r"(?i)(you\s+are\s+now\s+(?!a\s+helpful))",
+        r"(?i)(act\s+as\s+(if\s+you\s+are|a)\s+(?!helpful))",
+        r"(?i)(system\s*:\s*you\s+are)",
+        r"(?i)(\[INST\]|\[/INST\]|<\|im_start\|>|<\|im_end\|>)",
+        r"(?i)(jailbreak|dan\s+mode|developer\s+mode)",
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, text):
+            raise ValueError(
+                f"Potential prompt injection detected and blocked in user input."
+            )
+    return text
+
+
+def sanitize_chat_history(messages):
+    """
+    Sanitize each message's content in a list of chat history messages.
+    """
+    sanitized = []
+    for msg in messages:
+        if hasattr(msg, 'content') and isinstance(msg.content, str):
+            sanitized_content = sanitize_input(msg.content)
+            # Reconstruct the same message type with sanitized content
+            msg = msg.__class__(content=sanitized_content)
+        sanitized.append(msg)
+    return sanitized
+
+# Patterns for dynamic code execution primitives that must be stripped from LLM output
+_DANGEROUS_PATTERNS = re.compile(
+    r"(?m)^[^\n]*"
+    r"(?:"
+    r"\beval\s*\("
+    r"|\bexec\s*\("
+    r"|\bsubprocess\s*\.\s*\w*\s*\([^)]*shell\s*=\s*True"
+    r"|\bos\.system\s*\("
+    r"|\bos\.popen\s*\("
+    r"|\bcommands\.getoutput\s*\("
+    r"|\bpickle\.loads\s*\("
+    r"|\bcompile\s*\("
+    r"|\b__import__\s*\("
+    r"|\bimportlib\.import_module\s*\("
+    r"|<script[^>]*>[\s\S]*?</script>"
+    r")"
+    r"[^\n]*$"
+)
+
+
+def sanitize_llm_output(text: str) -> str:
+    """Remove lines containing dynamic code execution primitives from LLM output."""
+    if not text:
+        return text
+    sanitized = _DANGEROUS_PATTERNS.sub("", text)
+    # Collapse multiple consecutive blank lines introduced by removal
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+    return sanitized
 langfuse_service = LangfuseService()
 langfuse_handler = langfuse_service.get_handler()
+
+
+def _sanitize_document_content(text: str) -> str:
+    """
+    Replace hidden or invisible prompt patterns with '<hidden_prompts_removed>'.
+    Covers:
+      - Zero-width / invisible Unicode characters (ZWSP, ZWNJ, ZWJ, BOM, soft-hyphen, etc.)
+      - Runs of whitespace-only content that span a significant portion of the text
+        (white-on-white style padding blocks)
+      - HTML/CSS tiny-font or white-colour spans commonly used for prompt injection
+        e.g. <span style="font-size:0">...</span> or color:#fff / color:white
+      - Null bytes and other non-printable control characters (except normal whitespace)
+    """
+    HIDDEN_PROMPT_PLACEHOLDER = "<hidden_prompts_removed>"
+
+    # 1. Remove null bytes and non-printable control characters
+    #    (keep normal whitespace: space, tab, newline, carriage-return)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", HIDDEN_PROMPT_PLACEHOLDER, text)
+
+    # 2. Strip zero-width / invisible Unicode characters
+    invisible_unicode = (
+        "\u200b"  # zero-width space
+        "\u200c"  # zero-width non-joiner
+        "\u200d"  # zero-width joiner
+        "\u200e"  # left-to-right mark
+        "\u200f"  # right-to-left mark
+        "\u202a-\u202e"  # directional formatting
+        "\u2060"  # word joiner
+        "\u2061-\u2064"  # invisible math operators
+        "\ufeff"  # BOM / zero-width no-break space
+        "\u00ad"  # soft hyphen
+        "\u034f"  # combining grapheme joiner
+        "\u115f\u1160"  # Hangul fillers
+        "\u3164"  # Hangul filler
+        "\uffa0"  # halfwidth Hangul filler
+    )
+    text = re.sub(rf"[{invisible_unicode}]+", HIDDEN_PROMPT_PLACEHOLDER, text)
+
+    # 3. HTML/CSS-based hidden text patterns
+    #    a) font-size 0 or very small (0px, 0pt, 0em, 0rem, 1px, 1pt)
+    text = re.sub(
+        r"<[^>]*style\s*=\s*['\"][^'\"]*font-size\s*:\s*0[^'\"]*['\"][^>]*>.*?</[^>]+>",
+        HIDDEN_PROMPT_PLACEHOLDER,
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    #    b) color white / #fff / #ffffff (white-on-white)
+    text = re.sub(
+        r"<[^>]*style\s*=\s*['\"][^'\"]*color\s*:\s*(?:white|#fff(?:fff)?)[^'\"]*['\"][^>]*>.*?</[^>]+>",
+        HIDDEN_PROMPT_PLACEHOLDER,
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    #    c) visibility:hidden or display:none
+    text = re.sub(
+        r"<[^>]*style\s*=\s*['\"][^'\"]*(?:visibility\s*:\s*hidden|display\s*:\s*none)[^'\"]*['\"][^>]*>.*?</[^>]+>",
+        HIDDEN_PROMPT_PLACEHOLDER,
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # 4. Large blocks of whitespace-only padding (white-on-white trick without HTML)
+    #    Replace 20+ consecutive whitespace characters (spaces/tabs) with placeholder
+    text = re.sub(r"[ \t]{20,}", HIDDEN_PROMPT_PLACEHOLDER, text)
+
+    return text
 
 
 class IdempotentCompressor(BaseDocumentCompressor):
@@ -44,7 +190,13 @@ class IdempotentCompressor(BaseDocumentCompressor):
         query: str,
         callbacks: Optional[Callbacks] = None,
     ) -> Sequence[Document]:
-        return documents
+        sanitized = []
+        for doc in documents:
+            clean_content = _sanitize_document_content(doc.page_content)
+            if clean_content != doc.page_content:
+                doc = Document(page_content=clean_content, metadata=doc.metadata)
+            sanitized.append(doc)
+        return sanitized
 
 
 class QuivrQARAG:
@@ -60,6 +212,12 @@ class QuivrQARAG:
         vector_store: VectorStore,
         reranker: BaseDocumentCompressor | None = None,
     ):
+        model_name = getattr(retrieval_config.llm_config, "model", None)
+        if model_name not in APPROVED_LLM_MODELS:
+            raise ValueError(
+                f"Model '{model_name}' is not in the organization's approved LLM registry. "
+                f"Approved models: {APPROVED_LLM_MODELS}"
+            )
         self.retrieval_config = retrieval_config
         self.vector_store = vector_store
         self.llm_endpoint = llm
@@ -79,7 +237,7 @@ class QuivrQARAG:
         """
         Filter out the chat history to only include the messages that are relevant to the current question
 
-        Takes in a chat_history= [HumanMessage(content='Qui est Chloé ? '), AIMessage(content="Chloé est une salariée travaillant pour l'entreprise Quivr en tant qu'AI Engineer, sous la direction de son supérieur hiérarchique, Stanislas Girard."), HumanMessage(content='Dis moi en plus sur elle'), AIMessage(content=''), HumanMessage(content='Dis moi en plus sur elle'), AIMessage(content="Désolé, je n'ai pas d'autres informations sur Chloé à partir des fichiers fournis.")]
+        Takes in a chat_history= [HumanMessage(content='Qui est REDACTED ? '), AIMessage(content="REDACTED est une salariée travaillant pour l'entreprise Quivr en tant qu'AI Engineer, sous la direction de son supérieur hiérarchique, REDACTED."), HumanMessage(content='Dis moi en plus sur elle'), AIMessage(content=''), HumanMessage(content='Dis moi en plus sur elle'), AIMessage(content="Désolé, je n'ai pas d'autres informations sur REDACTED à partir des fichiers fournis.")]
         Returns a filtered chat_history with in priority: first max_tokens, then max_history where a Human message and an AI message count as one pair
         a token is 4 characters
         """
@@ -112,9 +270,11 @@ class QuivrQARAG:
 
         loaded_memory = RunnablePassthrough.assign(
             chat_history=RunnableLambda(
-                lambda x: self.filter_history(x["chat_history"]),
+                lambda x: sanitize_chat_history(
+                    self.filter_history(x["chat_history"])
+                ),
             ),
-            question=lambda x: x["question"],
+            question=lambda x: sanitize_input(x["question"]),
         )
 
         standalone_question = {
@@ -174,7 +334,7 @@ class QuivrQARAG:
         conversational_qa_chain = self.build_chain(concat_list_files)
         raw_llm_response = conversational_qa_chain.invoke(
             {
-                "question": question,
+                "question": sanitize_input(question),
                 "chat_history": history,
                 "custom_instructions": (self.retrieval_config.prompt),
             },
@@ -183,6 +343,7 @@ class QuivrQARAG:
         response = parse_response(
             raw_llm_response, self.retrieval_config.llm_config.model
         )
+        response.answer = sanitize_llm_output(response.answer)
         return response
 
     async def answer_astream(
@@ -207,7 +368,7 @@ class QuivrQARAG:
 
         async for chunk in conversational_qa_chain.astream(
             {
-                "question": question,
+                "question": sanitize_input(question),
                 "chat_history": history,
                 "custom_personality": (self.retrieval_config.prompt),
             },
@@ -228,8 +389,9 @@ class QuivrQARAG:
                     if self.llm_endpoint.supports_func_calling():
                         diff_answer = answer_str[len(prev_answer) :]
                         if len(diff_answer) > 0:
+                            safe_diff = sanitize_llm_output(diff_answer)
                             parsed_chunk = ParsedRAGChunkResponse(
-                                answer=diff_answer,
+                                answer=safe_diff,
                                 metadata=RAGResponseMetadata(),
                             )
                             prev_answer += diff_answer
@@ -239,8 +401,9 @@ class QuivrQARAG:
                             )
                             yield parsed_chunk
                     else:
+                        safe_answer = sanitize_llm_output(answer_str)
                         parsed_chunk = ParsedRAGChunkResponse(
-                            answer=answer_str,
+                            answer=safe_answer,
                             metadata=RAGResponseMetadata(),
                         )
                         logger.debug(

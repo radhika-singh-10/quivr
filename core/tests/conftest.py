@@ -3,6 +3,10 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+# Model card / technical documentation for the OpenAI GPAI model used via LLMEndpoint.
+# See MODEL_CARD_URL for capabilities, limitations, and intended use.
+MODEL_CARD_URL = "https://openai.com/research/"  # TODO: replace with the exact model card URL before deployment
+
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.language_models import FakeListChatModel
@@ -67,6 +71,7 @@ def chunks_stream_answer():
 
 @pytest.fixture(autouse=True)
 def openai_api_key():
+    # GPAI integration via LLMEndpoint — model card / technical docs: MODEL_CARD_URL
     os.environ["OPENAI_API_KEY"] = "this-is-a-test-key"
 
 

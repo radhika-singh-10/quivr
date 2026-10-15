@@ -19,6 +19,30 @@ from quivr_core.rag.utils import model_supports_function_calling
 
 logger = logging.getLogger("quivr_core")
 
+# Model card / technical documentation references for each GPAI provider.
+# TODO: Replace any placeholder URLs with the exact model card URL before deployment.
+MODEL_CARD_URL_OPENAI = "https://openai.com/research/"  # OpenAI model cards and research
+MODEL_CARD_URL_AZURE_OPENAI = "https://openai.com/research/"  # Azure-hosted OpenAI models
+MODEL_CARD_URL_ANTHROPIC = "https://www.anthropic.com/research"  # Anthropic model cards
+MODEL_CARD_URL_GEMINI = "https://ai.google.dev/gemini-api/docs"  # Google Gemini technical docs
+MODEL_CARD_URL_MISTRAL = "https://docs.mistral.ai/"  # Mistral AI technical documentation
+
+# Organization-approved model registry.
+# Only models whose names start with an entry in this set may be instantiated.
+APPROVED_MODEL_PREFIXES: frozenset[str] = frozenset({
+    # Add approved model name prefixes here, e.g.:
+    # "approved-model-v1",
+})
+
+
+def _assert_model_approved(model: str) -> None:
+    """Raise ValueError if *model* is not in the organisation's approved registry."""
+    if not any(model.startswith(prefix) for prefix in APPROVED_MODEL_PREFIXES):
+        raise ValueError(
+            f"Model '{model}' is not in the organisation's approved model registry. "
+            "Add it to APPROVED_MODEL_PREFIXES in llm_endpoint.py after obtaining approval."
+        )
+
 
 class LLMTokenizer:
     _cache: dict[
@@ -223,7 +247,10 @@ class LLMEndpoint:
             ChatGroq,
         ]
         try:
+            _assert_model_approved(config.model)
+
             if config.supplier == DefaultModelSuppliers.AZURE:
+                # Model card / technical docs: MODEL_CARD_URL_AZURE_OPENAI
                 # Parse the URL
                 parsed_url = urlparse(config.llm_base_url)
                 deployment = parsed_url.path.split("/")[3]  # type: ignore
@@ -240,6 +267,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.ANTHROPIC:
+                # Model card / technical docs: MODEL_CARD_URL_ANTHROPIC
                 assert config.llm_api_key, "Can't load model config"
                 _llm = ChatAnthropic(
                     model_name=config.model,
@@ -251,6 +279,7 @@ class LLMEndpoint:
                     stop=None,
                 )
             elif config.supplier == DefaultModelSuppliers.OPENAI:
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -263,6 +292,7 @@ class LLMEndpoint:
                     else None,
                 )
             elif config.supplier == DefaultModelSuppliers.MISTRAL:
+                # Model card / technical docs: MODEL_CARD_URL_MISTRAL
                 _llm = ChatMistralAI(
                     model_name=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -272,6 +302,7 @@ class LLMEndpoint:
                     temperature=config.temperature,
                 )
             elif config.supplier == DefaultModelSuppliers.GEMINI:
+                # Model card / technical docs: MODEL_CARD_URL_GEMINI
                 _llm = ChatGoogleGenerativeAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
@@ -293,6 +324,8 @@ class LLMEndpoint:
                 )
 
             else:
+                # Fallback to OpenAI-compatible endpoint.
+                # Model card / technical docs: MODEL_CARD_URL_OPENAI
                 _llm = ChatOpenAI(
                     model=config.model,
                     api_key=SecretStr(config.llm_api_key)
